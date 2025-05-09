@@ -1,0 +1,858 @@
+################################################
+#### 1. Scenario A : admixtime 100 gens ago ####
+################################################
+
+cd /home/donghee_kim/project/IntrogressionHMM/Simulation
+mkdir -p Ancient; cd Ancient 
+mkdir -p ScenarioA.tv/data 
+mkdir -p ScenarioA.all/data
+
+pt1=($(pwd)"/")
+scf1=${pt1}"Simulating_ancient_genome.py"
+scf2=${pt1}"Simulation_Helper.sh"
+dir1=${pt1}"ScenarioA.tv/data/"
+dir2=${pt1}"ScenarioA.all/data/"
+
+mutrate1=0.4e-8
+mutrate2=1.2e-8
+admixtime=100
+outgroup=1000
+archaic=20000
+proportion=0.05
+genomesize=5e7
+
+maxchrom=20
+nperrun=2
+
+#CMD=${scf2}" "${scf1}" "${dir1}" "${mutrate1}" "${admixtime}" "${outgroup}" "${archaic}" "${proportion}" "${genomesize}
+#sbatch --array=1-${maxchrom}%${nperrun} -c 12 --mem 22000 --wrap="$CMD"
+
+CMD=${scf2}" "${scf1}" "${dir2}" "${mutrate2}" "${admixtime}" "${outgroup}" "${archaic}" "${proportion}" "${genomesize}
+#sbatch --array=1-${maxchrom}%${nperrun} -c 12 --mem 22000 --wrap="$CMD"
+sbatch --array=16 -c 12 --mem 22000 --wrap="$CMD"
+
+###### save the following script as "Simulation_Helper.sh" #############
+
+#!/bin/bash
+
+chr=$SLURM_ARRAY_TASK_ID
+
+scf1=$1
+odir=$2
+mutrate=$3
+admixtime=$4
+outgroup=$5
+archaic=$6
+proportion=$7
+genomesize=$8
+
+
+/home/donghee_kim/.conda/envs/momi/bin/python ${scf1} -m ${mutrate} -a ${admixtime} -og ${outgroup} -ar ${archaic} -p ${proportion} -g ${genomesize} -c ${chr} -o ${odir}
+
+
+###### save the following script as "Simulating_ancient_genome.py" #############
+
+import argparse
+import msprime as msp
+import numpy as np
+import random
+import tskit 
+import time
+
+parser = argparse.ArgumentParser(description='Simulation')
+parser.add_argument('--mutrate','-m', help="mutation rate", default=0.3e-8)
+parser.add_argument('--admixtime','-a', help="admixed time", default=100)
+parser.add_argument('--outgroup','-og', help="outgroup split time", default=1000)
+parser.add_argument('--archaic','-ar', help="archaic split time", default=20000)
+parser.add_argument('--proportion','-p', help="admixture proportion", default=0.05)
+parser.add_argument('--genomesize','-g', help="genome size", default=5e7)
+parser.add_argument('--chr','-c', help="chromosome number", default="1")
+parser.add_argument('--outdir','-o', help="output directory", default="./")
+args = parser.parse_args()
+
+gen_time = 6.0 
+rec_rate = 1.25e-8 
+mu = float(args.mutrate) # transversion
+genome_size = float(args.genomesize)
+chrom = str(args.chr)
+odir =  str(args.outdir)
+
+# Populations sizes (number of individuals)
+Ne_Anatolia = 10000
+Ne_Asia = 10000
+Ne_Taurine = 10000
+Ne_Indicine = 10000
+Ne_Banteng = 10000
+Ne_Auroch = 10000
+Ne_Taurine_Ancestor = 10000
+Ne_Cattle_Ancestor = 10000
+Ne_Bos_Ancestor = 10000
+
+# Split times (gen)
+Domestication = float(args.outgroup)
+Auroch_Taurine_Split = float(args.archaic)
+
+# Admix parameters (gen)
+Auroch_admix_time = float(args.admixtime)
+AurochProportion = float(args.proportion)
+admix_into = 1 # (1 for Asia Taurine)
+
+# Number of samples
+n_ingroup = 20
+Auroch_samples = 200  # investigate introgression
+Outgroup_samples = 400
+Outgroup2_samples = 100 # investigate introgression
+
+samples = [msp.Sample(0, 0)]*Outgroup_samples + [msp.Sample(1, 0)]*n_ingroup + [msp.Sample(2, Auroch_admix_time - 2)]*Auroch_samples   + [msp.Sample(3, Domestication-2)]*Outgroup2_samples  # Sample(pop number, Sampling time)
+
+population_configurations = [
+    msp.PopulationConfiguration(initial_size = Ne_Anatolia), #0 Reference
+    msp.PopulationConfiguration(initial_size = Ne_Asia), #1 Target
+    msp.PopulationConfiguration(initial_size = Ne_Auroch), #2 Aurochs
+    msp.PopulationConfiguration(initial_size = Ne_Anatolia), #3 outgroup2
+]
+
+demographic_events_dict = {
+    # admixture times
+    Auroch_admix_time + random.uniform(0,1)/100000.0: msp.MassMigration(time = Auroch_admix_time, source = 1, destination = 2 ,proportion = AurochProportion),
+
+    # Taurine parameters
+    Domestication - 1 + random.uniform(0,1)/100000.0: msp.MassMigration(time = Domestication - 1, source = 3, destination = 0, proportion = 1.0),
+    Domestication + random.uniform(0,1)/100000.0: msp.MassMigration(time = Domestication, source = 1, destination = 0, proportion = 1.0),
+    #Domestication + 0.1 + random.uniform(0,1)/100000.0: msp.PopulationParametersChange(time = Domestication  + 0.0001, initial_size = 100, growth_rate = 0, population_id = 0), ## Domestication bottleneck
+    Domestication + 100.1 + random.uniform(0,1)/100000.0: msp.PopulationParametersChange(time = Domestication  + 0.0001, initial_size = Ne_Taurine, growth_rate = 0, population_id = 0),
+    
+
+    # Auroch population merges parameters
+
+    # Taurine and Aurochs are the same population
+    Auroch_Taurine_Split + random.uniform(0,1)/100000.0: msp.MassMigration(time = Auroch_Taurine_Split, source = 2, destination = 0,proportion = 1.0),
+    Auroch_Taurine_Split + 0.0001 + random.uniform(0,1)/100000.0: msp.PopulationParametersChange(time = Auroch_Taurine_Split + 0.0001, initial_size = Ne_Taurine_Ancestor, growth_rate = 0, population_id = 0),
+
+    }
+
+demographic_events = []
+
+for i, key in enumerate(sorted(demographic_events_dict)):
+    demographic_events.append(demographic_events_dict[key])
+
+# --------------------------------------------------------------------------------------
+# Simulate
+# --------------------------------------------------------------------------------------
+
+start1 = time.time()
+# Run simulations
+ts = msp.simulate(
+    samples = samples,
+    population_configurations = population_configurations,
+    demographic_events = demographic_events,
+    length = genome_size, recombination_rate = rec_rate,      
+    mutation_rate = mu
+)
+end1 = time.time()
+print(f"Simulation took {end1 - start1:.1f} sec")
+
+#--------------------------------------------------------------------------------------
+# Get mean coalescent time & introgressed tracts
+#--------------------------------------------------------------------------------------
+
+start2 = time.time()
+
+tree = tskit.Tree(ts)
+outgroup_node = [i for i in range(0,Outgroup_samples)]
+ingroup_node = [i for i in range(Outgroup_samples,Outgroup_samples+n_ingroup)]
+aurochs_node = [i for i in range(Outgroup_samples+n_ingroup,Outgroup_samples+n_ingroup+Auroch_samples)]
+outgroup2_node = [i for i in range(Outgroup_samples+n_ingroup+Auroch_samples,Outgroup_samples+n_ingroup+Auroch_samples+Outgroup2_samples)]
+
+mean_coal = []
+
+for i in range(0,len(ingroup_node)//2):
+    in_node1=ingroup_node[2*i]
+    in_node2=ingroup_node[2*i+1]
+    
+    intro_list=[]
+    intro_left=0
+    intro_right=0
+    intro_genome=0
+    intro_mrca_sum=0
+    
+    endo_list=[]
+    endo_left=0
+    endo_right=0
+    endo_genome=0
+    endo_mrca_sum=0
+    
+    introgressed=False
+
+    while tree.next():
+        left=int(tree.interval[0])
+        right=int(tree.interval[1])
+        mrca1 = min([tree.tmrca(in_node1,out_node) for out_node in outgroup_node])
+        mrca2 = min([tree.tmrca(in_node2,out_node) for out_node in outgroup_node])
+        imrca1 = min([tree.tmrca(in_node1,out_node) for out_node in outgroup2_node])
+        imrca2 = min([tree.tmrca(in_node2,out_node) for out_node in outgroup2_node])
+
+        mrca_with_aurochs1 = min([tree.tmrca(in_node1,au_node) for au_node in aurochs_node])
+        mrca_with_aurochs2 = min([tree.tmrca(in_node2,au_node) for au_node in aurochs_node])
+        intro_condition = ((imrca1 > Auroch_Taurine_Split) & (imrca1 > mrca_with_aurochs1)) or ((imrca2 > Auroch_Taurine_Split) & (imrca2 > mrca_with_aurochs2))
+        
+        if intro_condition & introgressed: 
+            intro_genome+=(right-left)
+            intro_mrca_sum+=max(mrca1,mrca2)*(right-left)
+            intro_right=right # update 
+            
+        elif intro_condition & (not introgressed): 
+            intro_genome+=(right-left)
+            intro_mrca_sum+=max(mrca1,mrca2)*(right-left)
+            endo_list.append([chrom,endo_left,endo_right])
+            intro_left=left
+            intro_right=right
+            introgressed=True
+
+        elif (not intro_condition) & introgressed:
+            endo_genome+=(right-left)
+            endo_mrca_sum+=(mrca1+mrca2)/2*(right-left)
+            intro_list.append([chrom,intro_left,intro_right])
+            endo_left=left
+            endo_right=right
+            introgressed=False
+            
+        else :
+            endo_genome+=(right-left)
+            endo_mrca_sum+=(mrca1+mrca2)/2*(right-left)
+            endo_right=right # update
+            
+    # at the end of the genome
+    if introgressed: 
+        intro_list.append([chrom,intro_left,intro_right])
+    else :
+        endo_list.append([chrom,endo_left,endo_right])
+    
+    # mean coalescent time 
+    if intro_genome > 0:
+        mean_coal.append(['AST'+str(i),endo_mrca_sum/endo_genome, intro_mrca_sum/intro_genome])
+    else :
+        mean_coal.append(['AST'+str(i),endo_mrca_sum/endo_genome, 0])
+    # save the introgressed tract file 
+    if1=odir + "AST"+str(i)+ ".chr" + chrom + ".introgressed.bed"
+    with open(if1, 'a') as f:
+        for tract in intro_list:
+            f.write('\t'.join([str(tract[0]), str(tract[1]),str(tract[2])]) + '\n')
+
+# save the mean coalescent file 
+if2= odir + "chr" + chrom + ".mean_coalescent_time.txt"
+with open(if2, 'a') as f:
+    for line in mean_coal:
+        f.write('\t'.join([line[0], str(line[1]),str(line[2])]) + '\n')
+
+end2 = time.time()
+print(f"Tree traversal took {end2 - start2:.1f} sec")
+
+
+#--------------------------------------------------------------------------------------
+# Get archaic segments
+#--------------------------------------------------------------------------------------
+print ('removing outgroup')
+start3 = time.time()
+
+Testpopulation = ts.get_samples(1)
+Outgroup = ts.get_samples(0)
+Aurochs = ts.get_samples(3)
+
+# Write observation, Whole genotype output  (only keep sites which are not varying in Outgroup)
+
+for i in range(0,int(n_ingroup/2)):
+    obs1 = odir + 'AST'+str(i)+'.chr' + chrom +'.dip.Anc.txt' # diploid 
+    obs2 = odir + 'AST'+str(i)+'.chr' + chrom +'.psh.Anc.txt' # pseudohaploid
+
+    with open(obs1, 'w') as f1:
+        f1.write('\t'.join(['chrom','pos','ancestral_base','genotype']) + '\n')
+    with open(obs2, 'w') as f2:
+        f2.write('\t'.join(['chrom','pos','ancestral_base','genotype']) + '\n')
+
+    for variant in ts.variants():
+        pos = str(int(variant.site.position))
+        Tests_dip = variant.genotypes[Testpopulation][2*i] + variant.genotypes[Testpopulation][2*i+1]
+        Tests_psh = random.sample([variant.genotypes[Testpopulation][2*i],variant.genotypes[Testpopulation][2*i+1]],k=1)[0]
+
+        # obs file for diploid and pseudohaploid
+        with open(obs1, 'a') as f1:
+            if np.sum(variant.genotypes[Outgroup]) == 0:
+                if Tests_dip >= 1:
+                    f1.write('\t'.join([str(chrom), pos, 'T', 'TA']) + '\n')
+        with open(obs2, 'a') as f2:
+            if np.sum(variant.genotypes[Outgroup]) == 0:
+                if Tests_psh >= 1:
+                    f2.write('\t'.join([str(chrom), pos, 'T', 'TA']) + '\n')
+
+
+end3 = time.time()
+print(f"Extracting private variants took {end3 - start3:.1f} sec")
+
+# mut rate file
+mrate = odir + 'chr' + chrom + '.mutrate.txt'
+with open(mrate, 'w') as f:
+    f.write('\t'.join(['chrom','start','end','mutationrate']) + '\n')
+    f.write('\t'.join([chrom,'0',str(int(genome_size)),'1.0']) + '\n')
+    f.close()
+
+# Bed file 
+mask = odir + 'chr' + chrom  + '.mask.bed'
+with open(mask, 'w') as f:
+    f.write('\t'.join([chrom,'0',str(int(genome_size))]) + '\n')
+    f.close()
+
+############################
+#### 2. make up files  ####
+############################
+
+cd /home/donghee_kim/project/IntrogressionHMM/Simulation/Ancient/
+
+pt2=($(pwd)"/")
+dt1=${pt2}"ScenarioA.tv/data/"
+dt2=${pt2}"ScenarioA.all/data/"
+
+indnum=9
+chrnum=20
+
+for pt1 in ${dt1} ${dt2}; do 
+
+    # per ind
+    while read inum; do
+        of1=${pt1}"AST"${inum}".introgressed.bed"
+        of2=${pt1}"AST"${inum}".psh.Anc.txt"
+        of3=${pt1}"AST"${inum}".dip.Anc.txt"
+        while read cnum; do
+            fn1=${pt1}"AST"${inum}".chr"${cnum}".introgressed.bed"
+            fn2=${pt1}"AST"${inum}".chr"${cnum}".psh.Anc.txt"
+            fn3=${pt1}"AST"${inum}".chr"${cnum}".dip.Anc.txt"
+            if [[ "$cnum" == 1 ]]; then
+                cat ${fn1} > ${of1}
+                cat ${fn2} > ${of2}
+                cat ${fn3} > ${of3}
+                
+            else 
+                cat ${fn1} >> ${of1}
+                tail -n +2 ${fn2} >> ${of2}
+                tail -n +2 ${fn3} >> ${of3}
+            fi
+        done < <(seq 1 ${chrnum})
+    done < <(seq 0 ${indnum})
+
+    # for all 
+    of1=${pt1}"mask.bed"
+    of2=${pt1}"mutrate.txt"
+    of3=${pt1}"mean_coalescent_time.txt"
+
+    while read cnum; do
+        fn1=${pt1}"chr"${cnum}".mask.bed"
+        fn2=${pt1}"chr"${cnum}".mutrate.txt"
+        fn3=${pt1}"chr"${cnum}".mean_coalescent_time.txt"
+        if [[ "$cnum" == 1 ]]; then
+            cat ${fn1} > ${of1}
+            cat ${fn2} > ${of2}
+            cat ${fn3} > temp1 
+        else 
+            cat ${fn1} >> ${of1}
+            tail -n +2 ${fn2} >> ${of2}
+            paste ${fn3} temp1 |awk '{OFS="\t"}{print $1,$2+$5,$3+$6}' > temp2
+            mv temp2 temp1 
+        fi
+    done < <(seq 1 ${chrnum})
+    awk -v chrnum=$chrnum '{OFS="\t"}{print $1,$2/chrnum,$3/chrnum}' temp1 > ${of3}
+    rm temp1
+done 
+
+rm ${dt1}*.chr*.introgressed.bed ${dt1}*.chr*.Anc.txt ${dt1}chr*.txt ${dt1}chr*.bed
+rm ${dt2}*.chr*.introgressed.bed ${dt2}*.chr*.Anc.txt ${dt2}chr*.txt ${dt2}chr*.bed
+
+
+
+######################
+#### 3. masking & HMM ####
+######################
+
+cd /home/donghee_kim/project/IntrogressionHMM/Simulation/Ancient/
+
+pt0=($(pwd)"/")
+#dt1=${pt0}"ScenarioA.tv/"
+dt2=${pt0}"ScenarioA.all/"
+scf1=${pt0}"masking_hmm.sh"
+
+#for pt1 in ${dt1} ${dt2}; do
+pt1=${dt2} 
+    fn1=${pt1}"data/mask.bed"
+    fn2=${pt1}"data/genome.txt"
+    cov1=${pt1}"data/coverage.txt"
+
+    # genereate genome file 
+    cut -f1,3 ${fn1} > ${fn2}
+
+    # generate cov file 
+    while read num; do 
+        echo ${num} >> temp1
+    done < <(seq 10 10 100)
+    awk '{OFS="\t"}{print NR, $1}' temp1 > ${cov1}
+    
+    window=10000
+    idnmax=($(wc -l ${cov1}))
+    nperrun=5
+
+    CMD=${scf1}" "${cov1}" "${fn2}" "${window}" "${pt1}
+    sbatch --array=1-${idnmax}%${nperrun}  -c 8 --mem 15000 --wrap="$CMD"
+    rm temp1 
+done 
+
+#################### masking_hmm.sh ############
+
+#!/bin/bash
+
+cov1=$1
+fn2=$2
+window=$3
+pt1=$4
+
+cd ${pt1}
+
+inum=$SLURM_ARRAY_TASK_ID
+cov=($(awk -v inum="$inum" '{if ($1==inum) print $2}' ${cov1}))
+gsize=($(awk '{sum+=$2}END{print sum}' ${fn2}))
+
+date # start 
+echo ${inum}" "${cov}" "${gsize}
+
+let ninv=gsize/window*cov/100 ## number of intervals
+
+mkdir -p cov${cov}; cd cov${cov}
+
+# make random intervals
+if [[ "$cov" == "100" ]]; then
+    cp ../data/mask.bed ./
+else
+    bedtools makewindows -g ${fn2} -w ${window} |shuf -n ${ninv} - | sort -k1,1n -k2,2n > mask.bed
+fi
+
+cp ../data/mutrate.txt ./
+
+for i in {0..9}; do
+    iid="AST"${i}
+    fn1="../data/"${iid}".dip.Anc.txt"
+    fn2="../data/"${iid}".psh.Anc.txt"
+    of1=${iid}".dip.Anc.txt"
+    of2=${iid}".psh.Anc.txt"
+
+    echo ${iid} "starts"
+
+    ## masking 
+    head -n 1 ${fn1} > ${of1}
+    tail -n +2 ${fn1} | awk '{OFS="\t"}{print $1,$2-1,$2,$3,$4}' | bedtools intersect -a - -b mask.bed | cut -f1,3,4,5 >> ${of1}
+    head -n 1 ${fn2} > ${of2}
+    tail -n +2 ${fn2} | awk '{OFS="\t"}{print $1,$2-1,$2,$3,$4}' | bedtools intersect -a - -b mask.bed | cut -f1,3,4,5 >> ${of2}
+
+    ## Training 
+    /home/donghee_kim/.conda/envs/momi/bin/hmmix train -obs=${iid}.dip.Anc.txt -window_size=3000 -weights=mask.bed -mutrates=mutrate.txt -out=${iid}.dip.Anc.trained.json 
+    /home/donghee_kim/.conda/envs/momi/bin/hmmix train -obs=${iid}.psh.Anc.txt -window_size=3000 -weights=mask.bed -mutrates=mutrate.txt -out=${iid}.psh.Anc.trained.json 
+
+    ## Decode
+    /home/donghee_kim/.conda/envs/momi/bin/hmmix decode -obs=${iid}.dip.Anc.txt -window_size=3000 -weights=mask.bed  -mutrates=mutrate.txt -param=${iid}.dip.Anc.trained.json -out=${iid}.dip.Anc.decoded
+    /home/donghee_kim/.conda/envs/momi/bin/hmmix decode -obs=${iid}.psh.Anc.txt -window_size=3000 -weights=mask.bed  -mutrates=mutrate.txt -param=${iid}.psh.Anc.trained.json -out=${iid}.psh.Anc.decoded
+
+    ## Calculate sensitivity and precision
+    bed1="../data/"${iid}".introgressed.bed"
+    of3=${iid}".decoding.summary.txt"
+
+    echo -e "IID\tType\tGamma\tAlpha_true\tAlpha_dec\tFN\tFP" > ${of3}
+
+    for type in dip psh; do 
+        rn1=${iid}"."${type}".Anc.decoded.diploid.txt"
+        for gamma in 0.5 0.6 0.7 0.8 0.9; do 
+            val1=($(awk '{sum+=($3-$2)}END{print sum}' ${bed1})) # true introgressed tracts 
+            val2=($(tail -n +2 ${rn1} |awk -v gamma=$gamma '$6>gamma && $5=="Archaic"' | awk '{sum+=($3-$2)}END{print sum}')) # inferred introgressed tracts 
+            val3=($(tail -n +2 ${rn1} |awk -v gamma=$gamma '$6>gamma && $5=="Archaic"' | bedtools intersect -a - -b ${bed1} | awk '{sum+=($3-$2)}END{ if (sum!="") print sum; else print 0}')) # Overlapped region
+
+            echo -e ${iid} ${type} ${gamma} ${gsize} ${val1} ${val2} ${val3}| \
+            awk '{OFS="\t"}{print $1,$2,$3,$5/$4,$6/$4,1-$7/$5,1-$7/$6}' >> ${of3}
+        done 
+    done
+done 
+
+
+date # end 
+
+###########################################################
+#### 4. Gather inferred parameter ####
+###########################################################
+
+cd /home/donghee_kim/project/IntrogressionHMM/Simulation/Ancient/
+
+pt1=($(pwd)"/")
+
+## HMM parameters
+of1=${pt1}"ScenarioA_HMM_parameter.txt" 
+echo -e "Mutation\tCoverage\tIID\tCall\tP\tQ\tLambda_In\tLambda_Arc" > ${of1}
+
+for mut in tv all; do 
+    dt1=${pt1}"ScenarioA."${mut}"/"
+    while read cov; do 
+        for call in dip psh; do 
+            for inum in {0..9}; do 
+                iid="AST"${inum}
+                fn1=${dt1}"cov"${cov}"/"${iid}"."${call}".Anc.trained.json" 
+                P1=($(head -n 13 ${fn1}|tail -n 1))
+                Q1=($(head -n 16 ${fn1}|tail -n 1|sed s/","/""/g))
+                li1=($(head -n 21 ${fn1}|tail -n 1|sed s/","/""/g))
+                la1=($(head -n 22 ${fn1}|tail -n 1))
+                echo -e ${mut}"\t"${cov}"\t"${iid}"\t"${call}"\t"${P1}"\t"${Q1}"\t"${li1}"\t"${la1} >> ${of1}
+            done 
+        done 
+    done < <(seq 10 10 100)
+done 
+
+## decoding summary
+of2=${pt1}"ScenarioA_decoding_summary.txt" 
+echo -e "Mutation\tCoverage\tIID\tCall\tGamma\tAlpha_true\tAlpha_dec\tFN\tFP" > ${of2}
+
+for mut in tv all; do 
+    dt1=${pt1}"ScenarioA."${mut}"/"
+    while read cov; do 
+        for inum in {0..9}; do 
+            iid="AST"${inum}
+            fn1=${dt1}"cov"${cov}"/"${iid}".decoding.summary.txt" 
+            tail -n +2 ${fn1} | awk -v cov=$cov -v mut=$mut '{OFS="\t"}{print mut,cov, $0}' >> ${of2}
+        done 
+    done < <(seq 10 10 100)
+done 
+
+#### plot using R #########
+conda activate Admixtools
+
+R 
+
+## HMM parameters
+rm=list()
+library(ggplot2)
+
+tdf <- read.table("ScenarioA_HMM_parameter.txt",header=T)
+coal1 <- read.table("ScenarioA.tv/data/mean_coalescent_time.txt",header=F)
+coal2 <- read.table("ScenarioA.all/data/mean_coalescent_time.txt",header=F)
+
+## true parameter
+alpha_true <- 5
+admix_time <- 100 
+coal_in <- mean(c(coal1$V2))
+coal_arc <- mean(c(coal1$V3))
+
+## global parameter 
+rho <- 1.25e-8 # recombination rate
+g <- 6 # generation time
+windows <- c(3000,1000)
+
+## mutation rate 
+mutnames <- c("tv","all")
+mutrates <- c(0.4e-8,1.2e-8) # mutation rate
+
+for (i in c(1,2)) {
+    mutname <- mutnames[i]
+    mu <- mutrates[i] 
+    L <- windows[i]
+    df <- subset(tdf, Mutation == mutname)
+
+    df$alpha <- 100*df$P/(df$P + 2*df$Q)
+    df$T_admix <- (df$P + 2*df$Q)/(2*rho*L)
+
+    # diploid 
+    df$T_Ingroup <- df$Lambda_In/(2*mu*L)
+    df$T_Archaic <- (df$Lambda_Arc-df$T_Ingroup*mu*L)/(mu*L) 
+
+    # pseudohaploid
+    df[df$Call=="psh",]$T_Ingroup <- df[df$Call=="psh",]$Lambda_In/(mu*L)
+    df[df$Call=="psh",]$T_Archaic <- (2*df[df$Call=="psh",]$Lambda_Arc-df[df$Call=="psh",]$T_Ingroup*mu*L)/(mu*L) 
+
+    df$Coverage <- as.factor(df$Coverage)
+
+    ## plot 
+    pdf.name <- paste0("ScenarioA_HMM_parameters_",mutname)
+    pdf(paste0(pdf.name,".pdf"), width=12, height=8)
+
+    # alpha 
+    p <- ggplot(data=df, aes(x=Coverage, y=alpha, fill=Call))+
+    geom_boxplot() +
+    geom_hline(yintercept=alpha_true, col="red", linetype="dashed") +
+    labs(title = paste0("mutation rate: ",mutname), x = "Coverage (%)", y = "Alpha (%)") +
+    scale_fill_discrete(name="Call", breaks=c("dip","psh"), labels=c("Diploid", "Pseudohaploid")) + 
+    theme_bw() +
+    theme(axis.text.x = element_text(size=10), 
+            axis.title.x = element_text(size=12,face="bold"),
+            axis.text.y = element_text(size=10),
+            axis.title.y = element_text(size=12,face="bold"),
+            legend.title = element_text(size= 12, face = "bold"),
+            legend.text = element_text(size= 11)) 
+    
+    print(p)
+
+    # admix time 
+    p <- ggplot(data=df, aes(x=Coverage, y=T_admix, fill=Call))+
+    geom_boxplot() +
+    geom_hline(yintercept=admix_time, col="red", linetype="dashed") +
+    labs(title = paste0("mutation rate: ",mutname), x = "Coverage (%)", y = "Admixture time (gen)") +
+    scale_fill_discrete(name="Call", breaks=c("dip","psh"), labels=c("Diploid", "Pseudohaploid")) + 
+    theme_bw() +
+    theme(axis.text.x = element_text(size=10), 
+            axis.title.x = element_text(size=12,face="bold"),
+            axis.text.y = element_text(size=10),
+            axis.title.y = element_text(size=12,face="bold"),
+            legend.title = element_text(size= 12, face = "bold"),
+            legend.text = element_text(size= 11)) 
+
+    print(p)
+
+    # Coalescent with reference 
+    p <- ggplot(data=df, aes(x=Coverage, y=T_Ingroup, fill=Call))+
+    geom_boxplot() +
+    geom_hline(yintercept=coal_in, col="red", linetype="dashed") +
+    labs(title = paste0("mutation rate: ",mutname), x = "Coverage (%)", y = "T_ingroup (gen)") +
+    scale_fill_discrete(name="Call", breaks=c("dip","psh"), labels=c("Diploid", "Pseudohaploid")) + 
+    theme_bw() +
+    theme(axis.text.x = element_text(size=10), 
+            axis.title.x = element_text(size=12,face="bold"),
+            axis.text.y = element_text(size=10),
+            axis.title.y = element_text(size=12,face="bold"),
+            legend.title = element_text(size= 12, face = "bold"),
+            legend.text = element_text(size= 11)) 
+
+    print(p)
+
+    # Coalescent with archaic 
+    p <- ggplot(data=df, aes(x=Coverage, y=T_Archaic, fill=Call))+
+    geom_boxplot() +
+    geom_hline(yintercept=coal_arc, col="red", linetype="dashed") +
+    labs(title = paste0("mutation rate: ",mutname), x = "Coverage (%)", y = "T_archaic (gen)") +
+    scale_fill_discrete(name="Call", breaks=c("dip","psh"), labels=c("Diploid", "Pseudohaploid")) + 
+    theme_bw() +
+    theme(axis.text.x = element_text(size=10), 
+            axis.title.x = element_text(size=12,face="bold"),
+            axis.text.y = element_text(size=10),
+            axis.title.y = element_text(size=12,face="bold"),
+            legend.title = element_text(size= 12, face = "bold"),
+            legend.text = element_text(size= 11)) 
+
+    print(p)
+
+    dev.off()
+
+}
+
+## Decoding summary 
+tdf <- read.table("ScenarioA_decoding_summary.txt",header=T)
+
+## true parameter
+tdf$Coverage <- as.factor(tdf$Coverage)
+tdf$Gamma <- as.factor(tdf$Gamma)
+
+com_theme <- theme(axis.text.x = element_text(size=10), 
+            axis.title.x = element_text(size=12,face="bold"),
+            axis.text.y = element_text(size=10),
+            axis.title.y = element_text(size=12,face="bold"),
+            legend.title = element_text(size= 12, face = "bold"),
+            legend.text = element_text(size= 11),
+            plot.title = element_text(hjust = 0.5, size = 14, face = "bold")) 
+
+for (i in c(1,2)) {
+    mutname <- mutnames[i]
+    df <- subset(tdf, (Mutation==mutname) & (FP!="NA") )
+
+    ## plot 
+    pdf.name <- paste0("ScenarioA_decoding_summary_",mutname)
+    pdf(paste0(pdf.name,".pdf"), width=12, height=8)
+    
+    # False negative 
+    p <- ggplot(data=subset(df,Call=="dip"), aes(x=Coverage, y=FN*100, fill=Gamma))+
+    geom_boxplot() +
+    labs(title = "Diploid", x = "Coverage (%)", y = "False negative (%)") +
+    theme_bw() + ylim(c(0,100)) + com_theme
+
+    print(p)
+    
+
+    p <- ggplot(data=subset(df,Call=="psh"), aes(x=Coverage, y=FN*100, fill=Gamma))+
+    geom_boxplot() +
+    labs(title = "PseudoHaploid", x = "Coverage (%)", y = "False negative (%)") +
+    theme_bw() + ylim(c(0,100)) + com_theme
+
+    print(p)
+    
+    # False positive 
+    p <- ggplot(data=subset(df,Call=="dip"), aes(x=Coverage, y=FP*100, fill=Gamma))+
+    geom_boxplot() +
+    labs(title = "Diploid", x = "Coverage (%)", y = "False positive (%)") +
+    theme_bw() + ylim(c(0,100)) + com_theme
+
+
+    print(p)
+
+    p <- ggplot(data=subset(df,Call=="psh"), aes(x=Coverage, y=FP*100, fill=Gamma))+
+    geom_boxplot() +
+    labs(title = "PseudoHaploid", x = "Coverage (%)", y = "False positive (%)") +
+    theme_bw() + ylim(c(0,100)) + com_theme
+
+    print(p)
+
+    # Introgressed segment length 
+    p <- ggplot(data=subset(df,Call=="dip"), aes(x=Coverage, y=Alpha_dec*100, fill=Gamma))+
+    geom_boxplot() +
+    geom_hline(yintercept=2*alpha_true, col="red", linetype="dashed") +
+    labs(title = "Diploid", x = "Coverage (%)", y = "Introgressed segments (%)") +
+    theme_bw() + com_theme
+
+    print(p)
+
+    p <- ggplot(data=subset(df,Call=="psh"), aes(x=Coverage, y=Alpha_dec*100, fill=Gamma))+
+    geom_boxplot() +
+    geom_hline(yintercept=2*alpha_true, col="red", linetype="dashed") +
+    labs(title = "PseudoHaploid", x = "Coverage (%)", y = "Introgressed segments (%)") +
+    theme_bw() + com_theme
+
+    print(p)
+    dev.off()
+}
+
+## Precision - Recall curve 
+tdf$Precision <- 1 - tdf$FP
+tdf$Recall <- 1 - tdf$FN 
+
+for (i in c(1,2)) {
+    mutname <- mutnames[i]
+    df <- subset(tdf, (Mutation==mutname) & (FP!="NA") )
+
+    pdf.name <- paste0("ScenarioA_precision_recall_",mutname)
+    pdf(paste0(pdf.name,".pdf"), width=8, height=8)
+
+    for (call in unique(df$Call)) {
+    
+    df2 <- subset(df, Call==call)
+    prec <- c(); rec <- c() ; gamma <- as.factor(c()); coverage <-c()
+    for (cov in unique(df2$Coverage)) {
+        df3 <- subset(df2, Coverage==cov)
+        p <- aggregate(df3$Precision, list(df3$Gamma), FUN=mean)$x
+        r <- aggregate(df3$Recall, list(df3$Gamma), FUN=mean)$x
+        prec <- c(prec,p)
+        rec <- c(rec,r)
+        gamma <- c(gamma,aggregate(df3$Recall, list(df3$Gamma), FUN=mean)$Group.1)
+        coverage <- c(coverage,c(rep(cov,length(p))))
+    } 
+    
+    pr <- data.frame(coverage,gamma,prec,rec)
+    colnames(pr) <- c("Coverage","Gamma","Precision","Recall")
+    
+    # plot 
+    p <- ggplot(data=pr, aes(x=Recall, y=Precision, col=Coverage))+
+        geom_line() +
+        geom_point() +
+        labs(title = call, x = "Recall", y = "Precision") +
+        theme_bw() + xlim(c(0,1)) + ylim(c(0,1)) +
+        theme(axis.text.x = element_text(size=10), 
+            axis.title.x = element_text(size=12,face="bold"),
+            axis.text.y = element_text(size=10),
+            axis.title.y = element_text(size=12,face="bold"),
+            legend.title = element_text(size= 12, face = "bold"),
+            legend.text = element_text(size= 11),
+            plot.title = element_text(hjust = 0.5, size = 14, face = "bold")) 
+    
+    print(p)
+    }
+
+    dev.off()
+}
+
+#############################
+#### 5. Truncate genome  ####
+#############################
+
+cd /home/donghee_kim/project/IntrogressionHMM/Simulation/Ancient/
+
+pt0=($(pwd)"/")
+dt1=${pt0}"ScenarioB.tv/"
+dt2=${pt0}"ScenarioB.all/"
+scf1=${pt0}"Truncating_genome.sh"
+
+for pt1 in ${dt1} ${dt2}; do 
+    fn2=${pt1}"data/genome.txt"
+    cov1=${pt1}"data/coverage.txt"
+
+    idnmax=($(wc -l ${cov1}))
+    nperrun=2
+
+    CMD=${scf1}" "${cov1}" "${fn2}" "${pt1}
+    sbatch --array=1-${idnmax}%${nperrun}  -c 8 --mem 15000 --wrap="$CMD"
+done 
+
+## decoding summary
+pt0=($(pwd)"/")
+of1=${pt0}"ScenarioB_truncate_decoding_summary.txt" 
+echo -e "Mutation\tCoverage\tIID\tCall\tTruncate\tGamma\tAlpha_true\tAlpha_dec\tFN\tFP" > ${of1}
+
+for mut in tv all; do 
+    dt1=${pt0}"ScenarioB."${mut}"/"
+    while read cov; do 
+        for inum in {0..9}; do 
+            iid="AST"${inum}
+            fn1=${dt1}"cov"${cov}"/"${iid}".truncate.decoding.summary.txt" 
+            tail -n +2 ${fn1} | awk -v cov=$cov -v mut=$mut '{OFS="\t"}{print mut,cov, $0}' >> ${of1}
+        done 
+    done < <(seq 10 10 100)
+done 
+
+#################### Truncating_genome.sh ############
+
+#!/bin/bash
+
+cov1=$1
+fn2=$2
+pt1=$3
+
+cd ${pt1}
+
+inum=$SLURM_ARRAY_TASK_ID
+cov=($(awk -v inum="$inum" '{if ($1==inum) print $2}' ${cov1}))
+gsize=($(awk '{sum+=$2}END{print sum}' ${fn2}))
+
+cd cov${cov}
+
+for i in {0..9}; do
+    iid="AST"${i}
+    fn1="../data/"${iid}".dip.Anc.txt"
+    fn2="../data/"${iid}".psh.Anc.txt"
+    of1=${iid}".dip.Anc.txt"
+    of2=${iid}".psh.Anc.txt"
+
+    ## Calculate sensitivity and precision for truncation 
+    bed1="../data/"${iid}".introgressed.bed"
+    of3=${iid}".truncate.decoding.summary.txt"
+
+    echo -e "IID\tType\tTruncate\tGamma\tAlpha_true\tAlpha_dec\tFN\tFP" > ${of3}
+
+    for type in dip psh; do 
+        rn1=${iid}"."${type}".Anc.decoded.diploid.txt"
+        for cut in 0 50000 100000 200000 400000; do 
+            for gamma in 0.5 0.6 0.7 0.8 0.9; do 
+                val1=($(awk '{sum+=($3-$2)}END{print sum}' ${bed1})) # true introgressed tracts 
+                val2=($(tail -n +2 ${rn1} |awk -v gamma=$gamma -v cut=$cut '$4>cut && $6>gamma && $5=="Archaic"' | awk '{sum+=($3-$2)}END{print sum}')) # inferred introgressed tracts 
+                val3=($(tail -n +2 ${rn1} |awk -v gamma=$gamma -v cut=$cut '$4>cut && $6>gamma && $5=="Archaic"' | bedtools intersect -a - -b ${bed1} | awk '{sum+=($3-$2)}END{ if (sum!="") print sum; else print 0}')) # Overlapped region
+
+                echo -e ${iid} ${type} ${cut} ${gamma} ${gsize} ${val1} ${val2} ${val3}| \
+                awk '{OFS="\t"}{print $1,$2,$3,$4,$6/$5,$7/$5,1-$8/$6,1-$8/$7}' >> ${of3}
+            done 
+        done
+    done
+done 
+
+
+
+
+
+
+
+
+
+
+
