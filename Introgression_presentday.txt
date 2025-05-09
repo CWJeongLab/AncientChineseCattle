@@ -1,0 +1,483 @@
+##################################
+#### 1. make individual list  ####
+##################################
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/IntrogressionHMM_230611/sample_data
+
+pt1=($(pwd)"/")
+lst1=${pt1}"New_Sample_info_595.txt"
+lst2=${pt1}"NorthEastAsia_lst.txt"
+
+# make NorthEastAsia group list
+grep -w "NorthEastAsia" ${lst1}| cut -f3| sort|uniq > ${lst2}
+
+# make individual.json
+# ingroup == NorthEastAsia cattle
+# outgroup (groupG) = CentralSouthEurope, NorthEurope, WestEurope, EastAfrica, WestAfrica, NorthAmerica, SouthAmerica, IndiaPakistan, MiddleEast, Outgroup : Taurine and Indian Indicine + Chinese indicine except Asia
+while read pid ; do 
+    
+    of1=${pid}"_groupG.json"
+    echo '{' > ${of1}
+
+    # ingroup 
+    echo '  "ingroup": [' >> ${of1}
+    nin=($(grep -w ${pid} ${lst1}| wc -l ))
+    n1=0
+    while read iid; do 
+        let n1+=1
+        if [[ "$n1" != ${nin} ]] ; then echo '    "'${iid}'",' >> ${of1} ; else echo '    "'${iid}'"' >> ${of1} ; fi 
+    done < <(grep -w ${pid} ${lst1}|cut -f1)
+    echo '  ],' >> ${of1}  
+
+    # outgroup
+    echo '  "outgroup": [' >> ${of1}
+    nout=($(echo "CentralSouthEurope NorthEurope WestEurope WestAfrica EastAfrica NorthAmerica SouthAmerica IndiaPakistan MiddleEast DomesticYak ChineseGayal BangladeshGayal IndianGayal EuropeanBison Banteng Gaur AmericanBison Leiqiong Jian Wannan" |sed s/" "/"\n"/g| fgrep -wf - ${lst1} | wc -l)) 
+    n2=0
+    while read iid; do 
+        let n2+=1
+        if [[ "$n2" != ${nout} ]] ; then echo '    "'${iid}'",' >> ${of1} ; else echo '    "'${iid}'"]' >> ${of1} ; fi 
+    done < <(echo "CentralSouthEurope NorthEurope WestEurope WestAfrica EastAfrica NorthAmerica SouthAmerica IndiaPakistan MiddleEast DomesticYak ChineseGayal BangladeshGayal IndianGayal EuropeanBison Banteng Gaur AmericanBison Leiqiong Jian Wannan" |sed s/" "/"\n"/g| fgrep -wf - ${lst1}|cut -f1)
+    echo '}' >> ${of1} 
+
+done < ${lst2}
+
+
+###########################################################
+#### 2. Finding snps which are derived in the outgroup ####
+###########################################################
+
+## maybe it will be faster to split by chromosome 
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/IntrogressionHMM_230611/Outgroup
+
+pt1=($(pwd)"/")
+inj="/data2/projects1/AnimalsChina/analysis/Bos/IntrogressionHMM_230611/sample_data/Hanwoo_groupG.json"
+fn1="/data2/projects1/AnimalsChina/analysis/Bos/IntrogressionHMM_230611/bcf/Bos.biSNP.q30"
+mask="/data1/PubData/CattleMerged_210420/genotype/WholeGenome/Bos.final_filter.bed"
+ref="/home/References/Cattle/ARS-UCD1.2.chrY.fa"
+of1=${pt1}"groupG.mut.txt"
+scf1=${pt1}"Finding_SNPs_Outgroup.sh"
+
+sbatch -c 24 --mem 45000 --wrap=${scf1}" "${fn1}" "${inj}" "${mask}" "${of1}
+
+#################### Finding_SNPs_Outgroup.sh ############
+
+#!/bin/bash
+
+fn1=$1
+inj=$2
+mask=$3
+of1=$4
+chr=$SLURM_ARRAY_TASK_ID
+
+# find snps in outgroup 
+/home/donghee_kim/.conda/envs/momi/bin/hmmix create_outgroup -ind=${inj} -vcf=${fn1}*.bcf -out=${of1} -weights=${mask}
+
+
+###########################################################
+#### 3. Estimating mutation rate across genome ####
+###########################################################
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/IntrogressionHMM_230611/Outgroup
+
+pt1=($(pwd)"/")
+mask="/data1/PubData/CattleMerged_210420/genotype/WholeGenome/Bos.final_filter.bed"
+fn1=${pt1}"groupG.mut.txt"
+of1=${pt1}"groupG.mutrate.txt"
+scf1=${pt1}"Calculate_mutation_rate.sh"
+window=1000000
+
+sbatch -c 24 --mem 45000 --wrap=${scf1}" "${fn1}" "${mask}" "${of1}" "${window}
+
+#################### Calculate_mutation_rate.sh ############
+
+#!/bin/bash
+
+fn1=$1
+mask=$2
+of1=$3
+window=$4
+chr=$SLURM_ARRAY_TASK_ID
+
+/home/donghee_kim/.conda/envs/momi/bin/hmmix mutation_rate -outgroup=${fn1} -weights=${mask} -window_size=${window} -out ${of1}
+
+
+###########################################################
+#### 4. Find a set of variants which are not derived in the outgroup ####
+###########################################################
+
+## maybe it will be faster to combine all ingroup then split by group.
+## After, finding SNPs, determine Ancestral state with Africanbuffalo
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/IntrogressionHMM_230611/Ingroup/NorthEastAsia
+mkdir -p groupG; cd groupG
+
+pt1=($(pwd)"/")
+lst1="/data2/projects1/AnimalsChina/analysis/Bos/IntrogressionHMM_230611/sample_data/NorthEastAsia_lst.txt"
+fn1="/data2/projects1/AnimalsChina/analysis/Bos/IntrogressionHMM_230611/Outgroup/groupG.mut.txt" # outgroup mutation
+vcf1="/data2/projects1/AnimalsChina/analysis/Bos/IntrogressionHMM_230611/bcf/Bos.biSNP.q30"
+mt1="/data2/projects1/AnimalsChina/analysis/Bos/IntrogressionHMM_230611/Outgroup/groupG.mutrate.txt"
+mask="/data1/PubData/CattleMerged_210420/genotype/WholeGenome/Bos.final_filter.bed"
+scf1="/data2/projects1/AnimalsChina/analysis/Bos/IntrogressionHMM_230611/Ingroup/NorthEastAsia/groupD/Finding_SNPs_Ingroup.sh"
+grp="groupG"
+
+# make directory
+while read pid ; do mkdir -p ${pid} ; done < ${lst1}
+
+idnmax=($(wc -l ${lst1}))
+nperrun=5
+
+CMD=${scf1}" "${fn1}" "${vcf1}" "${mask}" "${mt1}" "${lst1}" "${grp}
+sbatch -p amd --array=1-${idnmax}%${nperrun} -c 24 --mem 45000 --wrap="$CMD"
+
+#################### Finding_SNPs_Ingroup.sh ############
+
+#!/bin/bash
+
+fn1=$1
+vcf1=$2
+mask=$3
+mt1=$4
+lst1=$5
+grp=$6
+
+inum=$SLURM_ARRAY_TASK_ID
+pid=($(awk -v inum="$inum" '{if (inum == NR) print $1}' ${lst1}))   ## pid
+
+inj="/data2/projects1/AnimalsChina/analysis/Bos/IntrogressionHMM_230611/sample_data/"${pid}"_"${grp}".json"
+
+cd ${pid}
+
+/home/donghee_kim/.conda/envs/momi/bin/hmmix create_ingroup  -ind=${inj} -vcf=${vcf1}*.bcf -weights=${mask} -out="./obs" -outgroup=${fn1} 
+
+
+########################
+#### 5-1. Training  ####
+########################
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/IntrogressionHMM_230611/Ingroup/NorthEastAsia/groupG
+
+pt1=($(pwd)"/")
+lst1=${pt1}"NorthEastAsia_individual.list.txt"
+mt1="/data2/projects1/AnimalsChina/analysis/Bos/IntrogressionHMM_230611/Outgroup/groupG.mutrate.txt"
+mask="/data1/PubData/CattleMerged_210420/genotype/WholeGenome/Bos.final_filter.bed"
+
+scf1=${pt1}"train_Ingroup.sh"
+
+idnmax=($(wc -l ${lst1}))
+nperrun=4
+
+CMD=${scf1}" "${mask}" "${mt1}" "${lst1}
+sbatch --array=1-${idnmax}%${nperrun} -c 12 --mem 22000 --wrap="$CMD"
+
+
+#################### train_Ingroup.sh ############
+
+#!/bin/bash
+
+mask=$1
+mt1=$2
+lst1=$3
+
+inum=$SLURM_ARRAY_TASK_ID
+iid=($(awk -v inum="$inum" '{if ($1==inum) print $2}' ${lst1}))   
+pid=($(awk -v inum="$inum" '{if ($1==inum) print $3}' ${lst1})) 
+
+cd ${pid}
+
+# HMM 
+/home/donghee_kim/.conda/envs/momi/bin/hmmix train -obs=./obs.${iid}.Anc.txt -weights=${mask} -mutrates=${mt1} -out=${iid}.Anc.trained.json 
+
+# Decoding 
+/home/donghee_kim/.conda/envs/momi/bin/hmmix decode -obs=./obs.${iid}.Anc.txt -weights=${mask} -mutrates=${mt1} -param=${iid}.Anc.trained.json -out=${iid}.Anc.decoded
+
+
+###########################################################
+#### 5-2. Gather inferred parameter ####
+###########################################################
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/IntrogressionHMM_230611/Ingroup/NorthEastAsia/groupG
+
+pt1=($(pwd)"/")
+lst1=${pt1}"NorthEastAsia_individual.list.txt"
+of1=${pt1}"NorthEastAsia_parameter_groupG.txt" # outgroup = group G = EUT + AFT + Indian Indicine + African Cattle + Outgroup except buffalo, goat + Chinese indicine 
+
+echo -e "IID\tPID\tAncInfo\tP\tQ\tLambda_In\tLambda_Arc" > ${of1}
+
+## HMM parameters 
+while read inum iid pid; do 
+    fn1="./"${pid}"/"${iid}".Anc.trained.json" 
+    P1=($(head -n 13 ${fn1}|tail -n 1)) 
+    Q1=($(head -n 16 ${fn1}|tail -n 1|sed s/","/""/g))
+    li1=($(head -n 21 ${fn1}|tail -n 1|sed s/","/""/g))
+    la1=($(head -n 22 ${fn1}|tail -n 1))
+    echo -e ${iid}"\t"${pid}"\tWith\t"${P1}"\t"${Q1}"\t"${li1}"\t"${la1} >> ${of1}
+done < ${lst1}
+
+
+## Decoding parameters 
+ref="/home/References/Cattle/ARS-UCD1.2.chrY.fa"
+of1=${pt1}"NorthEastAsia_decoding_summary_groupG.txt"
+
+chrlen=($(head -n 29 ${ref}.fai |awk '{sum+=$2}END{print sum}'))
+
+echo -e "IID\tPID\tAncInfo\tP(Arc)\tLen\tPlen\tnsnps" > ${of1}
+
+while read cn iid pid ; do 
+    fn1="./"${pid}"/"${iid}".Anc.decoded.diploid.txt" 
+
+    for gamma in 0.5 0.6 0.7 0.8 0.9 ; do
+        awk -v gamma=$gamma '{ if ($5=="Archaic" && $6 > gamma) print $0}' ${fn1} > temp1
+        
+        len1=($(awk '{sum+=$4}END{print sum}' temp1)) 
+        plen1=($(echo ${len1} ${chrlen}|awk '{print $1/$2}')) 
+        nsnp1=($(awk '{sum+=$7}END{print sum}' temp1)) 
+
+        echo -e ${iid}"\t"${pid}"\tWith\t"${gamma}"\t"${len1}"\t"${plen1}"\t"${nsnp1} >> ${of1}
+    done
+done < ${lst1}
+
+#### plot using R #########
+conda activate Admixtools
+
+R 
+
+library(ggplot2)
+
+df <- read.table("./NorthEastAsia_parameter_groupG.txt", header=T)
+
+## global parameter 
+rho <- 1.6e-8 # recombination rate ()
+mu <- 1.1e-8 # mutation rate ()
+L <- 1e3 # window
+g <- 6 # generation time
+
+df$alpha <- 100*df$P/(df$P + 2*df$Q)
+df$T_admix <- (df$P + 2*df$Q)/(2*rho*L)
+
+df$T_Ingroup <- df$Lambda_In/(2*mu*L)
+df$T_Archaic <- (df$Lambda_Arc-df$T_Ingroup*mu*L)/(mu*L)
+
+write.table(df,"./NorthEastAsia_parameter_groupG_convert.txt",quote=F,row.names=F,sep="\t")
+
+df1 <- subset(df, AncInfo=="With")
+
+pdf.name <- "NorthEastAsia_parameter_groupG"
+pdf(paste0(pdf.name,".pdf"), width=12, height=8)
+
+## alpha
+# with AncInfo
+ggplot(df1, aes(x = IID, y = alpha, fill = PID)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(x = "", y = "alpha (%)", title = "With Ancestor state") + ylim(c(0,max(df$alpha))) + 
+  theme_bw() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.ticks.x = element_blank(), plot.title = element_text(hjust = 0.5, size = 16, face = "bold")) 
+
+## T_admix
+# with AncInfo
+ggplot(df1, aes(x = IID, y = T_admix, fill = PID)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(x = "", y = "T_admix (gen)", title = "With Ancestor state") + ylim(c(0,max(df$T_admix))) + 
+  theme_bw() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.ticks.x = element_blank(), plot.title = element_text(hjust = 0.5, size = 16, face = "bold")) 
+
+## T_Ingroup
+# with AncInfo
+ggplot(df1, aes(x = IID, y = T_Ingroup, fill = PID)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(x = "", y = "T_Ingroup (gen)", title = "With Ancestor state") + ylim(c(0,max(df$T_Ingroup))) + 
+  theme_bw() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.ticks.x = element_blank(), plot.title = element_text(hjust = 0.5, size = 16, face = "bold")) 
+
+## T_Archaic
+# with AncInfo
+ggplot(df1, aes(x = IID, y = T_Archaic, fill = PID)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(x = "", y = "T_Archaic (gen)", title = "With Ancestor state") + ylim(c(0,max(df$T_Archaic))) + 
+  theme_bw() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.ticks.x = element_blank(), plot.title = element_text(hjust = 0.5, size = 16, face = "bold")) 
+
+dev.off()
+
+## decoding summary 
+
+df <- read.table("./NorthEastAsia_decoding_summary_groupG.txt", header=T)
+
+df$alpha <- 100*df$Plen
+
+## save the plot for decoding summary
+
+pdf.name <- "NorthEastAsia_decoding_summary_groupG"
+pdf(paste0(pdf.name,".pdf"), width=12, height=8)
+
+for (r in unique(df$P.Arc.)) {
+    df1 <- subset(df, AncInfo=="With" & P.Arc. == r )
+
+    ## alpha
+    # with AncInfo
+    p1 <- ggplot(df1, aes(x = IID, y = alpha, fill = PID)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    labs(x = "", y = "alpha (%)", title = paste0("With Ancestor state, P(Arc) > ",r)) + ylim(c(0,max(df$alpha))) + 
+    theme_bw() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.ticks.x = element_blank(), plot.title = element_text(hjust = 0.5, size = 16, face = "bold")) 
+    print(p1)
+
+
+    ## nsnps
+    # with AncInfo
+    p1 <-ggplot(df1, aes(x = IID, y = nsnps, fill = PID)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    labs(x = "", y = "nsnps", title = paste0("With Ancestor state, P(Arc) > ",r)) + ylim(c(0,max(df$nsnps))) + 
+    theme_bw() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), axis.ticks.x = element_blank(), plot.title = element_text(hjust = 0.5, size = 16, face = "bold")) 
+    print(p1)
+
+}
+
+dev.off()
+
+
+#############################################################################
+#### 6. Test affinity between Archaic segment and Asian Auroch on 5688K #####
+############################################################################
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/IntrogressionHMM_230611/Ingroup/NorthEastAsia/groupG
+
+pt1=($(pwd)"/")
+lst1=${pt1}"NorthEastAsia_individual.list.txt"
+info="/data2/projects1/AnimalsChina/analysis/Bos/IntrogressionHMM_230611/sample_data/New_Sample_info_595.txt"
+fn1="/data2/projects1/AnimalsChina/analysis/Bos/genotypes/231114/Bos.5688K.auto.231117"
+fn2=${pt1}"Bos.5688K.auto.subset"
+scf1=${pt1}"Auroch_affinity_test.R"
+
+# subsampling necessary group
+pops="AfricanBuffalo Anatolia_Neolithic Hanwoo Mishima Kuchinoshima Yakutian Yanbian CPC98 Gyu2 Ch22 Th7 Sahiwal Jian Banteng Gaur DomesticYak EuropeanBison AmericanBison Honghe_LNBA Houtaomuga_LN Shuangta_EN"
+echo ${pops} | sed s/" "/"\n"/g | fgrep -wf - ${fn1}.ind > ${fn2}.ind
+
+cn1s=""
+while read iid sex pid; do
+cn=($(awk -v iid="$iid" 'BEGIN {cn=""} {if ($1 == iid) cn=NR} END {print cn}' ${fn1}.ind))
+if [[ "$cn1s" == "" ]]; then cn1s+=${cn}; else cn1s+=","${cn}; fi
+done < ${fn2}.ind
+
+cut -b${cn1s} ${fn1}.geno > ${fn2}.geno
+cp ${fn1}.snp ${fn2}.snp
+
+awk '{OFS="\t"}{print $2,$4-1,$4}' ${fn2}.snp | paste - ${fn2}.snp |paste - ${fn2}.geno > ${fn2}.bed
+
+# rewrite ind file
+cut -f2 ${lst1}|fgrep -wf - ${info} > temp_1 
+while read iid sex pid; do
+    npid=($(grep -w ${iid} temp_1|cut -f1))
+    if [[ "$npid" == "" ]]; then npid=${pid} ; fi 
+    echo -e ${iid}"\t"${sex}"\t"${npid} >> temp_2
+done < ${fn2}.ind
+mv temp_2 ${fn2}.ind
+rm temp_*
+
+# extract archaic segment per each individual
+r=0.9
+while read cn iid pid ; do 
+    dec1="./"${pid}"/"${iid}".Anc.decoded.diploid.txt"
+
+    # make bed file for filtering
+    awk -v r=$r '$5=="Archaic"&&$6>r' ${dec1} |awk '{OFS="\t"}{print $1,$2,$3+1000-1}' > temp1.bed
+
+    # overlapped region (Archaic) 
+    ~/apps/bedtools/bedtools2 intersect -a ${fn2}.bed -b temp1.bed -wa | cut -f4-9 > ${pid}/${iid}.5688K.Anc.Arc.r_${r}.snp
+    ~/apps/bedtools/bedtools2 intersect -a ${fn2}.bed -b temp1.bed -wa | cut -f10 > ${pid}/${iid}.5688K.Anc.Arc.r_${r}.geno
+    cp ${fn2}.ind ${pid}/${iid}.5688K.Anc.Arc.r_${r}.ind
+
+    # overlapped region (Ingroup) 
+    ~/apps/bedtools/bedtools2 intersect -v -a ${fn2}.bed -b temp1.bed -wa | cut -f4-9 > ${pid}/${iid}.5688K.Anc.In.r_${r}.snp
+    ~/apps/bedtools/bedtools2 intersect -v -a ${fn2}.bed -b temp1.bed -wa | cut -f10 > ${pid}/${iid}.5688K.Anc.In.r_${r}.geno
+    cp ${fn2}.ind ${pid}/${iid}.5688K.Anc.In.r_${r}.ind
+
+    echo ${iid}" is done"
+done < ${lst1}
+
+rm temp*
+
+################  R
+
+conda activate Admixtools
+
+R
+
+rm = list()
+library(admixtools)
+library(tidyverse)
+library(gridExtra)
+
+lst1 <- read.table("NorthEastAsia_individual.list.txt",header=F, col.names=c("cn","IID","PID"))
+
+r <- 0.9
+arc <- c("Arc","In")
+anc <- c("Anc")
+out <- "AfricanBuffalo"
+aus <- c("CPC98","Gyu2","Ch22","Th7","Sahiwal","Jian","Banteng","Gaur","EuropeanBison","AmericanBison","DomesticYak","Honghe_LNBA","Houtaomuga_LN","Shuangta_EN")
+tau <- "Anatolia_Neolithic"
+
+for (iid in lst1$IID) {
+    pid <- lst1$PID[lst1$IID == iid]
+    print(paste0(iid,",",pid))
+    for (ar in arc) {
+        for (an in anc) {
+            fn1 <- paste0("./",pid,"/",iid,".5688K.",an,".",ar,".r_",r)
+            f4result <- f4(fn1, out, aus, tau, iid, auto_only = F, poly_only=F, blgsize=5e6)
+            f4result$IID <- iid ; f4result$PID <- pid ; f4result$Archaic <- ar ; f4result$Ancestor <- an ;f4result$gamma <- r
+            # add to outgroup f3 data.frame 
+            if (!(exists("df") && is.data.frame(df)) ) { df <- f4result } else { df <- rbind(df, f4result) }
+        }
+
+    }
+}
+
+
+## write down f4 table
+table.name <- paste0("NorthEastAsia_groupG.5688K.f4", ".txt")
+write.table(df, file=table.name, quote=F, sep="\t", row.names=F)
+
+
+# plot
+df <- read.table("./NorthEastAsia_groupG.5688K.f4.txt", header=T)
+fn1 <- "./Bos.5688K.auto.subset"
+
+# Replacing 
+df$Archaic <- gsub("Arc", "Archaic", df$Archaic)
+df$Archaic <- gsub("In", "NonArchaic", df$Archaic)
+
+# Add whole-genome 
+f4result <- f4(fn1, out, aus, tau, lst1$IID, auto_only = F, poly_only=F, blgsize=5e6)
+f4result$IID <- f4result$pop4 ; f4result$PID <- NA; f4result$Archaic <- "WholeGenome" ; f4result$Ancestor <- "Anc" ; f4result$gamma <- r
+
+df <- rbind(df, f4result)
+
+pdf.name <- paste0("NorthEastAsia_groupG.5688K.f4", ".pdf")
+pdf(pdf.name, width=8, height=12)
+
+for (au in aus) {
+    # Ancetor state information
+    f4result <- subset(df,pop2==au)
+
+    # write f4  
+    xlabs <- paste0("f4(", out, ", ", au, "; ",tau, ", X) (3.s.e.)" )
+
+    # Create a bar plot with error bars using ggplot2
+    p1 <- ggplot(f4result, aes(x=est, y=pop4, col=Archaic) ) +
+    geom_point(size=3) +
+    geom_errorbar(aes(xmin=est-3*est/z, xmax=est+3*est/z), width=0.2, size=1.5) +
+    geom_vline(xintercept=0, color="red", linetype="dashed") +
+
+
+    # Add labels and title
+    labs(x=xlabs,y="", title=paste0("f4symmetry test") )+
+
+    # Set theme and axis limits
+    theme_minimal() +
+
+    # Change appearance of y-axis text
+    theme(axis.text.y=element_text(size=12, face="bold"), 
+        axis.text.x=element_text(size=12, face="bold"), 
+        axis.title.x= element_text(size=14, face="bold"),
+        plot.title = element_text(hjust = 0.5, size = 16, face = "bold"))
+
+    print(p1)
+}
+
+
+dev.off()

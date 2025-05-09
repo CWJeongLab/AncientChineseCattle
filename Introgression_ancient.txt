@@ -1,0 +1,879 @@
+##################################################
+#### 1. Make a list of ancient cattle genomes ####
+##################################################
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/
+mkdir -p IntrogressionHMM_240922; cd IntrogressionHMM_240922
+mkdir -p mask 
+
+pt1=($(pwd)"/")
+fn1="/data2/projects1/AnimalsChina/sample_info/Bos/JLU_cattle_unique_lib_summary_240503.txt"
+listf="/data2/projects1/AnimalsChina/sample_info/Bos/JLU_cattle_sample_info_240312.txt"
+ref="/home/References/Cattle/ARS-UCD1.2.chrY.fa"
+mask="/data1/PubData/CattleMerged_210420/genotype/WholeGenome/Bos.final_filter.bed"
+lst1=${pt1}"AncientChina_list_240922.txt"
+dt1="/data2/projects1/AnimalsChina/DataProcessing/Bos/"
+scf1=${pt1}"mask_genome_240922.sh" 
+
+# make list 
+tail -n +2 ${fn1}|awk '{if ($15>0.1) print $1,$3,$4,$15}' > temp1 
+while read iid; do 
+    pid=($(awk -v iid=$iid '{if ($1==iid) print $3}' ${listf}))
+    awk -v pid=$pid -v iid=$iid '{if ($1==iid) print $1,$2,$3,pid,$4}' temp1|sort -k4,4nr |head -n 1 >> temp2 
+done < <(cut -d " " -f1 temp1|sort|uniq)
+
+exc="DL Dongying_LN Honghe_LNBA Houtaomuga_LN Jiulongshan_IA_o Kaiyuan_Med Laosicheng Laosicheng_o Loulan_IA Jirentai_BA2 Shuangta_EN Taosi_LNBA_o Yangguanzhai_LN" 
+
+while read iid lid rid pid cov; do 
+    ibam=($(realpath ${dt1}/${iid}/BAM/${rid}.Cattle.L35.mapped.rmdup.q30.bam))
+    echo $iid $lid $rid $pid $cov $ibam >> temp3 
+done < <(echo ${exc}|sed s/" "/"\n"/g | grep -wvf - temp2) 
+
+# Shimao_LN1 
+while read iid; do 
+  ibam=($(realpath /data2/PubData/Chen2018NatCommun/BAM/${iid}/${iid}.perind.rmdup.q25.bam))
+  cov1=($(awk '$1=="mean" && $2=="coverageData" {print $4}' /data2/PubData/Chen2018NatCommun/analysis/qualimap/${iid}/${iid}.perind.rmdup.q25.qualimap.txt|sed s/"X"/""/g ))
+  echo -e ${iid} ${iid} ${iid} "Shimao_LN1" ${cov1} ${ibam} >> temp3
+done < <(echo "Shimao04,Shimao05" |sed s/","/"\n"/g)
+
+sed s/" "/"\t"/g temp3 > ${lst1}
+
+rm temp* 
+
+# make covered genome bed file  
+idnmax=($(wc -l ${lst1}))
+nperrun=4
+
+CMD=${scf1}" "${lst1}" "${mask}
+sbatch --array=1-${idnmax}%${nperrun} -c 8 --mem 15000 --wrap="$CMD"
+
+## summarize 
+of1=${pt1}"AncientChina_coverage_summary.txt" 
+echo "IID LID RID PID Depth Covered_bp_auto Coverage_auto Covered_bp_X Coverage_X" > ${of1}
+a1=($(awk '$1>=1&&$1<=29' ${ref}.fai|awk '{sum+=$2}END{print sum}'))
+a2=($(awk '$1=="X"' ${ref}.fai|awk '{sum+=$2}END{print sum}'))
+
+while read iid lid rid pid cov ibam; do 
+  bed1=${pt1}"mask/"${rid}".cov.bed"
+  b1=($(awk '$1>=1&&$1<=29' ${bed1}|awk '{sum+=($3-$2)}END{print sum}'))
+  b2=($(awk '$1=="X"' ${bed1}|awk '{sum+=($3-$2)}END{print sum}'))
+  echo ${iid} ${lid} ${rid} ${pid} ${cov} ${b1} ${b2}|awk -v a1=$a1 -v a2=$a2 '{print $1,$2,$3,$4,$5,$6,$6/a1,$7,$7/a2}' >> ${of1}
+  echo $iid is finished.
+done < ${lst1}
+
+#####################################################################
+######## save the following script as "mask_genome_240922.sh" #######
+
+#!/bin/bash 
+
+lst1=$1
+mask=$2
+
+inum=$SLURM_ARRAY_TASK_ID
+
+rid=($(awk -v inum=$inum '{ if (NR==inum) print $3}' ${lst1}))
+ibam=($(awk -v inum=$inum '{ if (NR==inum) print $6}' ${lst1}))
+
+cd mask 
+
+# mask where genome are not covered.
+bedtools genomecov -ibam ${ibam} -bg |cut -f1,2,3 | bedtools merge -i - > ${rid}.cov.bed
+
+# combine cov.bed with $mask
+bedtools intersect -a ${mask} -b ${rid}.cov.bed > ${rid}.intersect.bed
+
+
+####################################################################################################
+#### 2. mpileup and pileupcaller using previously called variants sets where bed files covered  ####
+####################################################################################################
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/IntrogressionHMM_240922
+mkdir -p mpileup
+
+pt1=($(pwd)"/")
+fn1="/data2/projects1/AnimalsChina/analysis/Bos/IntrogressionHMM_230611/Ingroup/AncientChina/variants/Bos.biSNP.q30"
+lst1=${pt1}"AncientChina_list_240922.txt"
+ref="/home/References/Cattle/ARS-UCD1.2.chrY.fa"
+mask="/data1/PubData/CattleMerged_210420/genotype/WholeGenome/Bos.final_filter.bed"
+scf1=${pt1}"random_genotyping.sh"
+
+## Run the job as a job array
+## only transversion & maksed region
+idnmax=($(wc -l ${lst1}))
+nperrun=2
+
+CMD=${scf1}" "${lst1}" "${fn1}" "${ref}" "${mask}
+
+sbatch --array=1-${idnmax}%${nperrun} -c 8 --mem 15000 --wrap="$CMD"
+
+######## save the following script as "random_genotyping.sh" #######
+
+#!/bin/bash 
+
+lst1=$1
+fn1=$2
+ref=$3
+mask=$4
+
+inum=$SLURM_ARRAY_TASK_ID
+
+iid=($(awk -v inum=$inum '{ if (NR==inum) print $3}' ${lst1}))
+ibam=($(awk -v inum=$inum '{ if (NR==inum) print $6}' ${lst1}))
+
+cd mpileup
+mkdir -p ${iid}
+
+#for K in {1..29} X; do 
+for K in X; do 
+    snpf1=${fn1}"."${K}".tv.snp"           ## .snp file
+    posf=${fn1}"."${K}".tv.pos.list.txt"   ## .pos file
+
+    of1=${iid}"."${K}".tv"
+    tn1="temp1_"${of1}
+
+    ## Run samtools mpileup
+    samtools mpileup -B -R -q30 -Q30 -l ${posf} -f ${ref} ${ibam} > ./${iid}/${of1}.pileup
+
+    ## Run pileupCaller
+    pileupCaller --randomHaploid --sampleNames ${iid} -f ${snpf1} -e ./${iid}/${tn1}_2 < ./${iid}/${of1}.pileup
+
+    ## extract only variants (different from reference)
+    paste ./${iid}/${tn1}_2.snp ./${iid}/${tn1}_2.geno | awk '{OFS="\t"}{print $2,$4-1,$4,$5,$6,$7}' | bedtools intersect -a - -b ${mask} | awk '{OFS="\t"}{ if ($6=="0") print $1,$3,$4,$4""$5}' > ${iid}/${of1}.mut.txt
+
+    ## Clear the files
+    gzip ./${iid}/${of1}.pileup
+    rm ./${iid}/${tn1}_*
+
+done
+
+######################################################################################################################
+#### 3-1. Find a set of variants which are not derived in the outgroup (group G) - find East Asian aurochs segments ####
+######################################################################################################################
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/IntrogressionHMM_240922/
+
+pt1=($(pwd)"/")
+pt0="/data2/projects1/AnimalsChina/analysis/Bos/IntrogressionHMM_231121/Ingroup/AncientChina/"
+pdir=${pt1}"mpileup/"
+lst1=${pt1}"AncientChina_list_240922.txt"
+dt1="/data2/projects1/AnimalsChina/analysis/Bos/IntrogressionHMM_230611/Outgroup/"
+frq="/data2/projects1/AnimalsChina/analysis/Bos/IntrogressionHMM_230611/Bovini_freq/Bovini_freq"
+scf1=${pt1}"Filterout_variants_240924.sh"
+
+## split variants by chromosome 
+# already done 
+
+## make directory
+for grp in G ; do 
+  while read rid; do mkdir -p group${grp}/${rid}; done < <(cut -f3 ${lst1})
+done 
+
+## run job
+idnmax=($(wc -l ${lst1}))
+nperrun=2
+
+for grp in G; do 
+  fn1=${pt0}"mutation/group"${grp}".mut"
+  CMD=${scf1}" "${lst1}" "${fn1}" "${pdir}" "${grp}
+  sbatch --array=1-${idnmax}%${nperrun} -c 8 --mem 15000 --wrap="$CMD"
+done 
+
+############################################################################
+######## save the following script as "Filterout_variants_240924.sh" #######
+
+#!/bin/bash 
+
+lst1=$1
+fn1=$2
+pdir=$3
+grp=$4
+
+cd group${grp}/
+
+inum=$SLURM_ARRAY_TASK_ID
+rid=($(awk -v inum=$inum '{ if (NR==inum) print $3}' ${lst1}))
+
+# generate allele count file using bcftools mpileup
+echo -e "chrom\tpos\tancestral_base\tgenotype" > ${rid}/${rid}.Anc.txt
+
+for K in {1..29} X; do 
+  fn2=${fn1}"."${K}".txt"
+  imut=${pdir}${rid}"/"${rid}"."${K}".tv.mut.txt"
+
+  # remove variants in Outgroup reference 
+  awk '{OFS="\t"}{print $1,$2}' ${fn2}| LC_ALL=C fgrep -wvf -  ${imut}  >> ${rid}/${rid}.Anc.txt
+
+  # Say something
+  echo ${rid}", chromosome "${K}" is done"
+done 
+
+
+##################################
+#### 4. Training & decoding  (group G) ####
+##################################
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/IntrogressionHMM_240922/groupG
+
+pt1=($(pwd)"/")
+pt0="/data2/projects1/AnimalsChina/analysis/Bos/IntrogressionHMM_240922/"
+lst1=${pt0}"AncientChina_list_240922.txt"
+mt1="/data2/projects1/AnimalsChina/analysis/Bos/IntrogressionHMM_230611/Outgroup/groupG.mutrate.txt"
+mdir=${pt0}"mask/"
+
+scf1=${pt0}"train_Ingroup_ancient.sh"
+
+idnmax=($(wc -l ${lst1}))
+nperrun=4
+
+CMD=${scf1}" "${lst1}" "${mt1}" "${mdir}
+sbatch --array=1-${idnmax}%${nperrun} -c 8 --mem 15000 -p amd --wrap="$CMD"
+
+
+#################### train_Ingroup_ancient.sh ############
+
+#!/bin/bash
+
+lst1=$1
+mt1=$2
+mdir=$3
+
+inum=$SLURM_ARRAY_TASK_ID
+rid=($(awk -v inum="$inum" '{if (NR==inum) print $3}' ${lst1}))   
+imask=${mdir}${rid}".intersect.bed"
+
+cd ${rid}
+
+# transversion set, so I extend window size to 3000 
+/home/donghee_kim/.conda/envs/momi/bin/hmmix train -obs=${rid}.Anc.txt -weights=${imask} -window_size 3000 -mutrates=${mt1} -out=${rid}.Anc.trained.json 
+/home/donghee_kim/.conda/envs/momi/bin/hmmix decode -obs=${rid}.Anc.txt  -weights=${imask} -window_size 3000  -mutrates=${mt1} -param=${rid}.Anc.trained.json -out=${rid}.Anc.decoded
+
+#######################
+#### 5. Summarize  ####
+#######################
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/IntrogressionHMM_240922/groupG
+
+pt1=($(pwd)"/")
+info="/data2/projects1/AnimalsChina/sample_info/Bos/JLU_cattle_unique_lib_summary_240503.txt"
+pt0="/data2/projects1/AnimalsChina/analysis/Bos/IntrogressionHMM_240922/"
+lst1=${pt0}"AncientChina_list_240922.txt"
+ref="/home/References/Cattle/ARS-UCD1.2.chrY.fa"
+of1="temp_chrX_summary.txt"
+
+# Extract aurochs tracts 
+xlen=($(awk '$1=="X"{print $2}' ${ref}.fai))
+pth=0.7
+s1=""
+
+echo "IID RID Cov sex Xlen Xprop" > ${of1}
+
+while read iid rid cov; do 
+  if [[ "$iid" == "Shimao04" || "$iid" == "Shimao05" ]]; then 
+    sex="F"
+  else  
+    sex=($(awk -v rid=$rid -F" " '{if ($4==rid) print $(NF-2)}' ${info}))
+  fi 
+  fn1=${pt1}${rid}"/"${rid}".Anc.decoded.diploid.txt"
+  fn2=${pt1}${rid}"/"${rid}".Anc.r_"${pth}".decoded.diploid.txt"
+
+  awk -v pth=$pth '$5=="Archaic" && $6 > pth' ${fn1} > ${fn2}
+  len=($(awk '$1=="X"' ${fn2} |awk '{sum+=$4}END{print sum}')) 
+  if [[ "$len" == "" ]];then len="0"; fi 
+  echo $iid $rid $cov $sex $len | awk -v xlen=$xlen '{print $1,$2,$3,$4,$5,$5/xlen*100}' >> ${of1}
+  echo $rid is finished 
+done < <(cut -f1,3,5 ${lst1})
+
+
+
+
+
+########################################################
+#### 6. Calculate f4  - AncientChina ####
+########################################################
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/IntrogressionHMM_231121/Ingroup/AncientChina/groupG
+
+pt1=($(pwd)"/")
+fn1=${pt1}"Bos.5688K.auto.subset"
+of1=${pt1}"Bos.5688K.auto.main"
+lst1=${pt1}"AncientChina_indiv_list.txt"
+
+# subsampling necessary group
+pops="AfricanBuffalo Anatolia_Neolithic CPC98 Gyu2 Ch22 Th7 Sahiwal Shuangta_EN"
+
+cn1s=""
+while read iid sex pid; do
+  cn=($(awk -v iid="$iid" 'BEGIN {cn=""} {if ($1 == iid) cn=NR} END {print cn}' ${fn1}.ind))
+  if [[ "$cn1s" == "" ]]; then cn1s+=${cn}; else cn1s+=","${cn}; fi
+done < <(echo ${pops} | sed s/" "/"\n"/g | fgrep -wf - ${fn1}.ind)
+
+cut -b${cn1s} ${fn1}.geno > temp1.geno
+echo ${pops} | sed s/" "/"\n"/g | fgrep -wf - ${fn1}.ind > ${of1}.ind
+
+# add ancient genotypes 
+genofs=""
+while read iid lid rid pid; do 
+    genof1="./genotypes/"${rid}"/"${rid}".5688K.geno"
+    genof2="./genotypes/"${rid}"/"${rid}".5688K.Archaic.geno"
+    genof3="./genotypes/"${rid}"/"${rid}".5688K.Human.geno"
+    echo -e ${iid}"\tU\t"${iid} >> ${of1}.ind
+    echo -e ${iid}"_archaic\tU\t"${iid}"_archaic" >> ${of1}.ind
+    echo -e ${iid}"_human\tU\t"${iid}"_human" >> ${of1}.ind
+    if [[ "$genofs" == "" ]]; then genofs+=${genof1}" "${genof2}" "${genof3}; else genofs+=" "${genof1}" "${genof2}" "${genof3}; fi
+done < <(tail -n +2 ${lst1})
+
+paste -d "" temp1.geno ${genofs} > ${of1}.geno
+cp ${fn1}.snp ${of1}.snp
+
+rm temp*
+
+################  R ##############################
+
+/home/donghee_kim/.conda/envs/Admixtools/bin/R
+
+rm = list()
+library(admixtools)
+library(tidyverse)
+library(gridExtra)
+
+lst1 <- read.table("AncientChina_indiv_list.txt",header=T)
+fn1 <- "/data2/projects1/AnimalsChina/analysis/Bos/IntrogressionHMM_231121/Ingroup/AncientChina/groupG/Bos.5688K.auto.main"
+
+pop1 <- "AfricanBuffalo"
+pop2 <- c("CPC98","Gyu2","Ch22","Th7","Sahiwal","Shuangta_EN")
+pop3 <- "Anatolia_Neolithic"
+pop4 <- c()
+for (i in 1:nrow(lst1)) {
+  iid <- lst1$IID[i]
+  pop4 <- c(pop4,paste0(iid),paste0(iid,"_human"), paste0(iid,"_archaic"))
+}
+
+df <- f4(fn1, pop1, pop2, pop3, pop4, auto_only = F, poly_only=F, blgsize=5e6)
+
+## write down f4 table
+table.name <- paste0("AncientChina_groupG.5688K.f4.240922", ".txt")
+write.table(df, file=table.name, quote=F, sep="\t", row.names=F)
+
+
+
+
+############################
+#### 7. Plot f4 results ####
+############################
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/IntrogressionHMM_230611/Ingroup/NorthEastAsia/groupG
+
+pt1=($(pwd)"/")
+
+################################################
+
+R
+
+rm = list()
+library(ggplot2)
+library(tidyverse)
+library(gridExtra)
+
+##### plotting 
+dt1 <- "/data2/projects1/AnimalsChina/analysis/Bos/IntrogressionHMM_231121/Ingroup/AncientChina/groupG/"
+lf1 <- read.table("NorthEastAsia_individual.list.txt",header=F)
+lf2 <- read.table(paste0(dt1,"AncientChina_indiv_list.txt"),header=T)
+df1 <- read.table("NorthEastAsia.groupG.archaic.f4.txt",header=T)
+df2 <- read.table(paste0(dt1,"AncientChina_groupG.5688K.f4.240922.txt"),header=T)
+
+df1$IID <- gsub("_human", "",gsub("_archaic","",df1$pop4))
+df2$IID <-  gsub("_human", "",gsub("_archaic","",str_split_i(df2$pop4, "\\W",1) ))
+df1$PID <- NA ; df2$PID <- NA 
+
+# modern 
+for (i in 1:nrow(lf1)) { 
+  pid <- lf1$V3[i]
+  iid <- lf1$V2[i]
+  df1$PID[df1$IID == iid] = pid  
+}
+
+# ancient 
+for (j in 1:nrow(lf2)) {
+  pid <- lf2$Population[j]
+  iid <- lf2$IID[j]
+  df2$PID[df2$IID == iid] = pid  
+}
+
+# combine 
+df <- rbind(df1,df2)
+
+df$Archaic <- "Wholegenome" 
+df$Archaic[str_detect(df$pop4,"_archaic")] <- "Archaic" 
+df$Archaic[str_detect(df$pop4,"_human")] <- "NonArchaic" 
+
+df$Sign <- "|Z|>3"
+df$Sign[df$z <= 3 & df$z >= -3] <- "|Z|<=3"
+
+## Regroup 
+# define group 
+g1 <- c("Hanwoo")
+g2 <- c("Mishima","Kuchinoshima")
+g3 <- c("Dashigou_LNBA","Beiyuan_LN","Changning_LNBA","Changning_BA","Shimao_LN1","Shimao_LN2","Dashanqian_BA","Dashanqian_LNBA","Beizhuangzi_BA","Majiayuan_IA","Jiulongshan_IA","Honghe_LNBA_o","NB")
+g4 <- c("Xiaohe","Hamiwupu_BA","Jirentai_BA1")
+
+glist <- list(g1,g2,g3,g4)
+gname <- c("Modern korea","Modern Japan","Ancient East Asia","Ancient Xinjiang")
+
+# Define criteria for group assignment
+assign_group <- function(pop) {
+  for (k in 1:length(glist)) {
+      if (pop %in% glist[[k]]) return(gname[k])
+  }
+  return("None")
+}
+
+sum_df <- df %>%
+  mutate(group = sapply(PID, assign_group))
+sum_df <- sum_df[sum_df$group != "None",]
+
+## sort in customized order 
+sum_df$group <- factor(sum_df$group, levels = gname)
+
+
+## box plot 
+
+## plot 
+theme_custom <-  theme_bw() + 
+  theme(axis.text.y=element_text(size=18, color="black"),  
+        axis.text.x=element_text(size=18, color="black",angle=45, vjust=0.6), 
+        axis.title.x= element_text(size=26, face="bold", vjust=-3),
+        axis.title.y= element_text(size=18, face="bold", vjust=5),
+        axis.ticks.y = element_line(size=1.5),
+        axis.ticks.x = element_line(size=1.5),
+        axis.ticks.length = unit(.4, "cm"),
+        #legend.text = element_text(size=16, face="bold"),
+        #legend.title = element_text(size=18, face="bold")
+        legend.position = "none",
+        plot.margin = unit(c(1.5,1,1.5,1), "cm" ))
+
+
+pchvec <- c(21,25)
+colvec <- c("red2","blue","darkgreen")
+
+of1 <- "./plot/EastAsia_combined_groupG.5688K.f4.boxplot.240922"
+pdf.name <- paste0(of1,".pdf")
+pdf( file=pdf.name, width =10, height = 8)
+outname <- "African Buffalo"
+
+p1 <- list()
+pop2s <- c("Shuangta_EN", "Ch22","Gyu2","CPC98","Th7","Sahiwal")
+pop2name <- c("Shuangta_EN","Anatolian aurochs","Armenian aurochs","British aurochs","Moroccan aurochs","Sahiwal")
+ymin <- min(subset(sum_df, !(is.na(z)) & n > 1000 )$est) ; ymax <- max(subset(sum_df, !(is.na(z)) & n > 1000 )$est)
+
+for (i in 1:length(pop2s) ) {
+    au <- pop2s[i]
+    au_name <- pop2name[i]
+    f4result <- subset(sum_df,pop2==au & !(is.na(z)) & n > 1000 )
+
+    # write f4  
+    #xlabs <- paste0("f4(", outname, ", ", au, "; Anatolia_Neolithic, X)" )
+    xlabs <- au_name
+
+    p1[[i]] <- ggplot(f4result, aes(x=group, y=est, fill=Archaic, shape=Sign ) )+
+    #geom_boxplot(col="black") +
+    geom_jitter(size=4, width=0.2 ) + 
+    geom_hline(yintercept=0, color="black", linetype="dashed", linewidth=1) +
+    scale_fill_manual(values=colvec, breaks = c('Archaic', 'NonArchaic','Wholegenome'),labels = c('Archaic', 'NonArchaic','Wholegenome')) +
+    scale_shape_manual(values=pchvec, breaks = c('|Z|<=3', '|Z|>3'),labels = c('|Z|<=3', '|Z|>3')) +
+    scale_y_continuous(breaks=c(-0.015,-0.01,-0.005,0,0.005), limits=c(ymin,ymax)) + 
+
+    # Add labels and title
+    labs(x=xlabs,y="est" ) + theme_custom 
+
+    print(p1[[i]])
+}
+
+dev.off()
+
+## write down f4 table
+table.name <- paste0("./plot/EastAsia_combined_groupG.5688K.f4.240922", ".txt")
+write.table(df, file=table.name, quote=F, sep="\t", row.names=F)
+
+
+# grid 
+pdf.name <- paste0(of1,".grid.pdf")
+pdf( file=pdf.name, width =16, height = 16)
+do.call("grid.arrange", c(p1, ncol=3))
+dev.off()
+
+
+# legend 
+pdf.name <- paste0("plot/EastAsia_combined_groupG.5688K.f4.legend.pdf")
+pdf( file=pdf.name, width =8, height = 12)
+par(cex.lab=1.7, cex.axis=1.7, cex.main=2)
+mm = cbind(c(1,2),c(1,2)); layout(mm, widths=c(10), heights=c(5,5))
+
+par(mar=c(5.1, 0.1, 1.1, 0.1))
+plot(c(0,1),c(0,1), type="n", xaxt="n", yaxt="n", xlab="", ylab="", bty="n")
+legend("topleft", title="Segments", legend=c('Archaic', 'NonArchaic','Wholegenome'), pch=22, pt.bg=colvec, text.font=2, x.intersp=0.5, cex=2.5, y.intersp=1.00, ncol=1, bty="n")
+
+par(mar=c(5.1, 0.1, 1.1, 0.1))
+plot(c(0,1),c(0,1), type="n", xaxt="n", yaxt="n", xlab="", ylab="", bty="n")
+legend("topleft", title="Significance", legend=c('|Z|<=3', '|Z|>3'), pch=pchvec, pt.bg="white", text.font=2, x.intersp=0.5, cex=2.5, y.intersp=1.00, ncol=1, bty="n")
+
+dev.off()
+
+################################################################
+### 8. Correlation between ancient and modern archaic tracts ###
+################################################################
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/IntrogressionHMM_231121/Ingroup/AncientChina/groupG
+
+pt1=($(pwd)"/")
+lst1=${pt1}"AncientChina_indiv_list.txt"
+ref="/home/References/Cattle/ARS-UCD1.2.chrY.fa"
+
+gsize=($(head -n 29 ${ref}.fai |awk '{sum+=$2}END{print sum}'))
+
+## ancient vs ancient 
+of1=${pt1}"Correlation_within_ancient_EAT_aurochs_tracts_v2.txt"
+
+while read iid1 lid1 rid1 pid1; do
+    bed1=${pt1}${rid1}"/"${rid1}".Anc.r_0.7.decoded.diploid.txt"
+    awk '$5=="Archaic" && $6>0.7' ${pt1}${rid1}/${rid1}.Anc.decoded.diploid.txt > ${bed1}
+done < <(tail -n +2 ${lst1})
+
+echo -e "IID1\tPID1\tIID2\tPID2\tprop1\tprop2\toverlapped\tcorr" > ${of1}
+
+while read iid1 lid1 rid1 pid1; do
+    bed1=${pt1}${rid1}"/"${rid1}".Anc.r_0.7.decoded.diploid.txt"
+    if [ -f "$bed1" ]; then  
+        prop1=($(awk -v gsize=$gsize '{sum+=($3-$2)}END{print sum/gsize}' ${bed1}))
+        while read iid2 lid2 rid2 pid2; do
+            if [ "$iid1" != "$iid2" ]; then 
+                bed2=${pt1}${rid2}"/"${rid2}".Anc.decoded.diploid.txt"
+                if [ -f "$bed2" ]; then 
+                    prop2=($(awk -v gsize=$gsize '{sum+=($3-$2)}END{print sum/gsize}' ${bed2})) 
+                    ovl=($(bedtools intersect -a ${bed1} -b ${bed2}|awk -v gsize=$gsize '{sum+=($3-$2)}END{print sum/gsize}')) ## overlapped
+                    corr=($(echo ${prop1} ${prop2} ${ovl}| awk '{print ($3-$1*$2)/( sqrt($1*(1-$1)) * sqrt($2*(1-$2)) )}' )) ## correlation = ( overlapped proportion - prop1*prop2 ) / (SD(prop1)*SD(prop2))
+                    echo -e ${iid1}"\t"${pid1}"\t"${iid2}"\t"${pid2}"\t"${prop1}"\t"${prop2}"\t"${ovl}"\t"${corr}
+                    echo -e ${iid1}"\t"${pid1}"\t"${iid2}"\t"${pid2}"\t"${prop1}"\t"${prop2}"\t"${ovl}"\t"${corr} >> ${of1}
+                fi
+            fi
+        done < <(tail -n +2 ${lst1})
+    fi
+done < <(tail -n +2 ${lst1})
+
+############## plotting  #########
+
+R 
+
+library(ggplot2)
+library(ggcorrplot)
+
+## correlation within ancient 
+df <- read.table("./Correlation_within_ancient_EAT_aurochs_tracts_v2.txt", header=T)
+
+p1s <- unique(df$PID1)
+
+smat1 = matrix(nrow=length(p1s), ncol=length(p1s))
+for (p1 in p1s) {
+    inum1 = which(p1s == p1) ## where sample is in sample vector
+    for (p2 in p1s) {
+        inum2 = which(p1s == p2) ## where sample is in sample vector
+        smat1[inum1,inum2] = mean(subset(df,PID1==p1 & PID2==p2)$corr)
+    }
+}
+rownames(smat1) <- p1s
+colnames(smat1) <- p1s
+
+pdf.name <- "./plot/Tract_Correlation_within_ancientEAT_240922"
+pdf(paste0(pdf.name,".pdf"), width=8, height=8)
+ggcorrplot(smat1, lab = TRUE, hc.order=TRUE) + scale_fill_gradient2(limit = c(0,0.23), low = "white", high =  "red", mid = "white", midpoint = 0.01)
+#+ theme_bw() + theme(axis.text.x = element_text(angle=90, size = 10, face = "bold"), axis.text.y = element_text( size = 10, face = "bold"), axis.title = element_text(size = 12, face = "bold")
+dev.off()
+
+
+#######################################################################################
+##### 9-1. count shared archaic variants with steppe/East Asian aurochs (ancient) #####
+#######################################################################################
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/IntrogressionHMM_240922/groupG/
+
+pt1=($(pwd)"/")
+listf="/data2/projects1/AnimalsChina/analysis/Bos/IntrogressionHMM_240922/AncientChina_list_240922.txt"
+lst1=${pt1}"aurochs_list.txt" # aurochs list 
+ref="/home/References/Cattle/ARS-UCD1.2.chrY.fa"
+scf1=${pt1}"shared_archaic_variant.sh"
+
+## make aurochs list 
+# AnimalsChina project 
+dt1="/data2/projects1/AnimalsChina/DataProcessing/Bos/"
+rids="ST02C.A0102.SG1 HH13C.A0101.SG1.1 HT07C.A0102.SG1"
+for rid in ${rids}; do 
+    iid=($(echo ${rid}|cut -d"." -f1))
+    ibam=${dt1}${iid}"/BAM/"${rid}".Cattle.L35.mapped.rmdup.q30.bam"
+    echo -e ${rid}"\t"${ibam} >> ${lst1}
+done 
+
+# Rossi 
+dt1="/data2/PubData/Rossi2024Nature/DataProcessing/"
+rids="Baikal1.A0101.SG9.1 Tula1.A0101.SG30.1 Borly4b.A0101.SG10.1 Var1.A0101.SG10.1 Rhi3.A0101.SG5.1 Rhi2.A0101.SG11.1"
+for rid in ${rids}; do 
+    iid=($(echo ${rid}|cut -d"." -f1))
+    ibam=${dt1}${iid}"/BAM/"${rid}".Cattle/"${rid}".Cattle.L35.mapped.rmdup.q30.bam"
+    echo -e ${rid}"\t"${ibam} >> ${lst1}
+done 
+
+
+CMD=${scf1}" "${listf}" "${lst1}" "${ref}
+
+idnmax=($(wc -l ${listf}))
+nperrun=16
+
+sbatch --array=1-${idnmax}%${nperrun} -c 8 --mem 30000 -p amd --wrap="$CMD"
+
+## summarize 
+of1=${pt1}"shared_archaic_variant_summary.txt"
+
+echo "ST02C HH13C HT07C Baikal1 Tula1 Borly4b Var1 Rhi3 Rhi2"|sed s/" "/"\n"/g > temp1 
+echo "East_Asian East_Asian East_Asian post-LGM_North_Asian pre-LGM_North_Asian Central_Asian Central_Asian post-LGM_European pre-LGM_European" | sed s/" "/"\n"/g > temp2
+
+echo -e "archaic\tarchaic_group" > aurochs_info.txt 
+paste temp1 temp2 >> aurochs_info.txt 
+
+echo -e "IID\tPID\tGID\tarchaic\tnsnp\tcovered\tshared\tshared_prop" > ${of1}
+
+while read iid lid rid pid; do 
+    if [[ "$pid" == "Jirentai_BA1" ]]; then
+        gid="Jirentai_BA1"
+    elif [[ "$pid" == "Xiaohe" || "$pid" == "Hamiwupu_BA" ]]; then
+        gid="Xinjiang" 
+    else
+        gid="East_Asia" 
+    fi 
+    tfn1=${pt1}${rid}"/"${rid}".archaic_shared.txt"
+    tail -n +2 ${tfn1} | cut -d"." -f1 > temp3 
+    tail -n +2 ${tfn1} | cut -f2- | paste temp3 - |awk -v iid=$iid -v pid=$pid -v gid=$gid '{OFS="\t"}{print iid,pid,gid,$0}' >> ${of1}
+done < <(cut -f1-4 ${listf})
+
+rm temp*
+
+###################################################################
+#### write the following script as "shared_archaic_variant.sh" ####
+
+#!/bin/bash
+
+listf=$1
+lst1=$2
+ref=$3 
+
+inum=$SLURM_ARRAY_TASK_ID
+
+iid=($(awk -v inum=$inum '{ if (NR==inum) print $3}' ${listf}))
+
+cd ${iid}
+
+fn1=${iid}".Anc.txt"
+fn2=${iid}".Anc.decoded.diploid.txt"
+
+tn1="temp_"${iid}
+
+echo -e "archaic\tnsnp\tcovered\tshared\tshared_prop" > ${iid}.archaic_shared.txt
+
+tail -n +2 ${fn2} | awk '{OFS="\t"}{if ($5=="Archaic" && $6>0.7) print $1,$2,$2+$4}' > ${tn1}_1 ## archaic tract
+tail -n +2 ${fn1} | awk '{OFS="\t"}{print $1,$2-1,$2}' > ${tn1}_2 ## all private mutations 
+ 
+bedtools intersect -a ${tn1}_1 -b ${tn1}_2 |cut -f1,3 > ${tn1}_3.pos.list.txt ## archaic mutations positions 
+fgrep -wf ${tn1}_3.pos.list.txt ${fn1} |cut -f4| cut -b2 > ${tn1}_3_2
+fgrep -wf ${tn1}_3.pos.list.txt ${fn1}| sed s/'X'/'30'/g| sed s/'Y'/'31'/g| paste - ${tn1}_3_2|awk '{OFS="\t"}{print $1":"$2,$1,"0.0",$2,$3,$5}' > ${tn1}_3.snp ## archaic mutations snp file 
+nsnp=($(wc -l ${tn1}_3.pos.list.txt)) 
+
+# per aurochs 
+while read aid ibam; do 
+    # mpileup & pileupcaller 
+    samtools mpileup -B -R -q30 -Q30 -l ${tn1}_3.pos.list.txt  -f ${ref} ${ibam} > ${tn1}_${aid}_4
+    cut -f 1 ${tn1}_${aid}_4 | sed s/'X'/'30'/g | sed s/'Y'/'31'/g | paste - ${tn1}_${aid}_4 | cut -f 1,3- | sort -k1,1n -k2,2n > ${tn1}_${aid}.pileup
+    pileupCaller --randomHaploid --sampleNames ${aid} -f ${tn1}_3.snp -e ${tn1}_${aid} < ${tn1}_${aid}.pileup
+
+    # count 
+    cat ${tn1}_${aid}.geno | awk '$1!=9' | awk -v aid=$aid -v nsnp=$nsnp '{OFS="\t"}{if ($1==0) sum+=1}END{print aid, nsnp, NR, sum, sum/NR}' >> ${iid}.archaic_shared.txt
+
+    rm ${tn1}_${aid}*
+done < ${lst1}
+
+rm ${tn1}_*
+
+#######################################################################################
+##### 9-2. count shared archaic variants with steppe/East Asian aurochs (modern) #####
+#######################################################################################
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/IntrogressionHMM_230611/Ingroup/NorthEastAsia/groupG/
+
+pt1=($(pwd)"/")
+listf=${pt1}"NorthEastAsia_individual.list.txt"
+lst1=${pt1}"aurochs_list.txt" # aurochs list 
+ref="/home/References/Cattle/ARS-UCD1.2.chrY.fa"
+scf1=${pt1}"shared_archaic_variant.sh"
+
+## make aurochs list 
+# AnimalsChina project 
+dt1="/data2/projects1/AnimalsChina/DataProcessing/Bos/"
+rids="ST02C.A0102.SG1 HH13C.A0101.SG1.1 HT07C.A0102.SG1"
+for rid in ${rids}; do 
+    iid=($(echo ${rid}|cut -d"." -f1))
+    ibam=${dt1}${iid}"/BAM/"${rid}".Cattle.L35.mapped.rmdup.q30.bam"
+    echo -e ${rid}"\t"${ibam} >> ${lst1}
+done 
+
+# Rossi 
+dt1="/data2/PubData/Rossi2024Nature/DataProcessing/"
+rids="Baikal1.A0101.SG9.1 Tula1.A0101.SG30.1 Borly4b.A0101.SG10.1 Var1.A0101.SG10.1 Rhi3.A0101.SG5.1 Rhi2.A0101.SG11.1"
+for rid in ${rids}; do 
+    iid=($(echo ${rid}|cut -d"." -f1))
+    ibam=${dt1}${iid}"/BAM/"${rid}".Cattle/"${rid}".Cattle.L35.mapped.rmdup.q30.bam"
+    echo -e ${rid}"\t"${ibam} >> ${lst1}
+done 
+
+CMD=${scf1}" "${listf}" "${lst1}" "${ref}
+
+idnmax=($(wc -l ${listf}))
+nperrun=16
+
+sbatch --array=1-${idnmax}%${nperrun} -c 8 --mem 30000 -p amd --wrap="$CMD"
+
+## summarize 
+of1=${pt1}"shared_archaic_variant_summary.txt"
+
+echo "ST02C HH13C HT07C Baikal1 Tula1 Borly4b Var1 Rhi3 Rhi2"|sed s/" "/"\n"/g > temp1 
+echo "East_Asian East_Asian East_Asian post-LGM_North_Asian pre-LGM_North_Asian Central_Asian Central_Asian post-LGM_European pre-LGM_European" | sed s/" "/"\n"/g > temp2
+
+echo -e "archaic\tarchaic_group" > aurochs_info.txt 
+paste temp1 temp2 >> aurochs_info.txt 
+
+echo -e "IID\tPID\tGID\tarchaic\tnsnp\tcovered\tshared\tshared_prop" > ${of1}
+
+while read iid pid; do 
+    if [[ "$pid" == "Hanwoo" ]]; then
+        gid="Modern_Korea"
+    else
+        gid="Modern_Japan" 
+    fi 
+    tfn1=${pt1}${pid}"/"${iid}".archaic_shared.txt"
+    tail -n +2 ${tfn1} | cut -d"." -f1 > temp3 
+    tail -n +2 ${tfn1} | cut -f2- | paste temp3 - |awk -v iid=$iid -v pid=$pid -v gid=$gid '{OFS="\t"}{print iid,pid,gid,$0}' >> ${of1}
+done < <(cut -f2-3 ${listf}|grep -e "Hanwoo" -e "Mishima" -e "Kuchinoshima")
+
+rm temp*
+
+###################################################################
+#### write the following script as "shared_archaic_variant.sh" ####
+
+#!/bin/bash
+
+listf=$1
+lst1=$2
+ref=$3 
+
+inum=$SLURM_ARRAY_TASK_ID
+
+iid=($(awk -v inum=$inum '{ if (NR==inum) print $2}' ${listf}))
+pid=($(awk -v inum=$inum '{ if (NR==inum) print $3}' ${listf}))
+
+cd ${pid}
+
+fn1="obs."${iid}".Anc.txt"
+fn2=${iid}".Anc.decoded.diploid.txt"
+
+tn1="temp_"${iid}
+
+echo -e "archaic\tnsnp\tcovered\tshared\tshared_prop" > ${iid}.archaic_shared.txt
+
+tail -n +2 ${fn2} | awk '{OFS="\t"}{if ($5=="Archaic" && $6>0.7) print $1,$2,$2+$4}' > ${tn1}_1 ## archaic tract
+tail -n +2 ${fn1} | awk '{OFS="\t"}{print $1,$2-1,$2}' > ${tn1}_2 ## all private mutations 
+ 
+bedtools intersect -a ${tn1}_1 -b ${tn1}_2 |cut -f1,3 > ${tn1}_3.pos.list.txt ## archaic mutations positions 
+fgrep -wf ${tn1}_3.pos.list.txt ${fn1} |cut -f4| cut -b2 > ${tn1}_3_2
+fgrep -wf ${tn1}_3.pos.list.txt ${fn1}| sed s/'X'/'30'/g| sed s/'Y'/'31'/g| paste - ${tn1}_3_2|awk '{OFS="\t"}{print $1":"$2,$1,"0.0",$2,$3,$5}' > ${tn1}_3.snp ## archaic mutations snp file 
+nsnp=($(wc -l ${tn1}_3.pos.list.txt)) 
+
+# per aurochs 
+while read aid ibam; do 
+    # mpileup & pileupcaller 
+    samtools mpileup -B -R -q30 -Q30 -l ${tn1}_3.pos.list.txt  -f ${ref} ${ibam} > ${tn1}_${aid}_4
+    cut -f 1 ${tn1}_${aid}_4 | sed s/'X'/'30'/g | sed s/'Y'/'31'/g | paste - ${tn1}_${aid}_4 | cut -f 1,3- | sort -k1,1n -k2,2n > ${tn1}_${aid}.pileup
+    pileupCaller --randomHaploid --sampleNames ${aid} -f ${tn1}_3.snp -e ${tn1}_${aid} < ${tn1}_${aid}.pileup
+
+    # count 
+    cat ${tn1}_${aid}.geno | awk '$1!=9' | awk -v aid=$aid -v nsnp=$nsnp '{OFS="\t"}{if ($1==0) sum+=1}END{print aid, nsnp, NR, sum, sum/NR}' >> ${iid}.archaic_shared.txt
+
+    rm ${tn1}_${aid}*
+done < ${lst1}
+
+rm ${tn1}_*
+
+###################################################################
+## plot using R 
+
+~/.conda/envs/Admixtools/bin/R
+
+library(ggplot2)
+
+# evec/eval 
+df1 <- read.table(file="/data2/projects1/AnimalsChina/analysis/Bos/IntrogressionHMM_240922/groupG/shared_archaic_variant_summary.txt",sep="\t",header=T) # ancient 
+df2 <- read.table(file="/data2/projects1/AnimalsChina/analysis/Bos/IntrogressionHMM_230611/Ingroup/NorthEastAsia/groupG/shared_archaic_variant_summary.txt",sep="\t",header=T) # modern 
+info <- read.table(file="aurochs_info.txt",header=T)
+
+df <- rbind(df1,df2)
+df <- merge(df,info,by="archaic")
+
+# position 
+grpvec <- c("East_Asian","post-LGM_North_Asian","pre-LGM_North_Asian","Central_Asian","post-LGM_European","pre-LGM_European")
+gidvec <- unique(df$GID)
+
+# pch/color 
+acols = c("red", "green", "yellow", "blue", "orange", "purple", "cyan", "magenta", "darkolivegreen1",
+  "pink", "aquamarine4", "lavender", "brown", "beige", "aquamarine1", "maroon",
+  "darkgoldenrod2", "coral", "navy", "grey", "black")
+
+pchvec <- rep(c(21:25), 100)[1:length(grpvec)]
+colvec <- rep(acols,10)[1:length(grpvec)]
+
+# Reorder PID factor clustered by Group
+df$archaic_group <- factor(df$archaic_group, levels = grpvec)
+df <- df[order(df$archaic_group), ]
+df$archaic <- factor(df$archaic, levels = unique(df$archaic))  # ordered by grouped sorting
+
+
+# Create the plot
+pdf(file="Archaic_sharing_pattern.pdf", width=8, height=6, colormodel="cmyk")
+for (gid in gidvec) { 
+    df2 <- subset(df, GID==gid & nsnp > 200 )
+    xlab <- "" 
+    ylab <- "Introgressed variants sharing proportion (%)"
+    titles <- paste0(gid)
+
+    plt <- ggplot(data = df2, aes(x=archaic, y=shared_prop*100) ) +
+                geom_boxplot( aes(fill=archaic_group) )+ 
+                #geom_jitter( aes(col=archaic_group), size=2 )+ 
+                scale_fill_manual(values = colvec, breaks= grpvec) + # Use custom colors
+                labs(x = xlab, y = ylab, title=titles) + # Axis labels and legend title
+                ylim(c(0,25)) + 
+                theme_bw() + # Use a clean theme
+                theme(
+                axis.text.x = element_text(angle = 90, hjust = 1, vjust=0.25, size = 10),
+                axis.text = element_text(size = 12, color="black"), # Adjust text size
+                axis.title = element_text(size = 14) # Axis title size
+                )
+    print(plt)
+}
+dev.off()
+
+
+
+
+
+
+
+
+
+
+
+
+
+

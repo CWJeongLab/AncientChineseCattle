@@ -1,0 +1,495 @@
+########################################
+#### 1. Calculate PMR - Test panel #####
+########################################
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/Classification_240526/
+
+pt1=($(pwd)"/")
+lst1="/data2/projects1/AnimalsChina/"
+snpfl="/data2/projects1/AnimalsChina/DataProcessing/Bos/snpf_list_cattle_50M.txt" ## SNPset
+ref="/home/References/Cattle/ARS-UCD1.2.chrY.fa"
+
+iids="DSG07C,HT07C,QHDL01C,LSC17C,JLS01C"
+rids="DSG07C.A0101.SG1.1,HT07C.A0102.SG1,QHDL01C.A0101.SG1.1,LSC17C.A0102.SG1,JLS01C.A0101.SG1.1"
+
+## Merge into a single file 
+of1="highcov" # date
+dt1="/data2/projects1/AnimalsChina/DataProcessing/Bos/"
+
+while read sp prx sfx; do 
+    of2=${sfx}"."${of1}
+    cov1=${of2}".pileup_coverage.txt"
+    echo -e "IID\tnCov\tpCov" > ${cov1}
+    genofs=""
+
+    for i in $(seq 1 5); do 
+        iid=($(echo ${iids}|cut -d"," -f${i}))
+        rid=($(echo ${rids}|cut -d"," -f${i}))
+        genof=($(realpath ${dt1}${iid}/genotypes/${rid}.${sp}.${sfx}.geno))
+        indf=($(realpath ${dt1}${iid}/genotypes/${rid}.${sp}.${sfx}.ind))
+        if [[ "$genofs" == "" ]]; then genofs+=${genof}; else genofs+=" "${genof}; fi
+        cat ${indf} >> ${of2}.ind
+        tail -n +2 ${dt1}${iid}/genotypes/${rid}.${sp}.${sfx}.cov.txt >> ${cov1}
+        echo $iid
+    done
+    
+    # add Leiqiong for Chinese indicine 
+    iid="LEI01"
+    genof=${iid}.${sfx}.geno
+    cn1=($(awk -v iid=$iid '{ if ($1==iid) print NR}' ${prx}.ind))
+    cut -b${cn1} ${prx}.geno > ${genof}
+    awk -v iid=$iid '{OFS="\t"}BEGIN{n1=0}{ if ($1!=9) n1+=1 }END{print iid,n1,n1/NR}' ${genof} >> ${cov1} 
+    awk -v iid=$iid '$1==iid' ${prx}.ind >> ${of2}.ind
+    genofs+=" "${genof}
+
+    tnind=($(echo ${genofs} | awk '{print NF}'))
+    if [ "$tnind" -gt 0 ]; then paste ${genofs} -d '' > ${of2}.geno; fi
+    echo "finish!"
+    
+    # separate 
+    sed 's/./& /g;s/ $//' ${of2}.geno > ${of2}.geno.txt
+
+done < ${snpfl}
+
+
+
+#####################################################################################
+################ save the following script as "Calculate_PMR_matrix.R" ############
+
+ssh node08
+
+R
+
+library(data.table)
+library(tictoc)
+
+# Input files 
+gfile="/data2/projects1/AnimalsChina/analysis/Bos/Classification_240526/bos.50M.highcov.geno.txt"
+ifile="/data2/projects1/AnimalsChina/analysis/Bos/Classification_240526/bos.50M.highcov.ind"
+pfile="/data2/projects1/AnimalsChina/analysis/Bos/Classification_240526/panel/Cattle_panel"
+of1="Testset_50M_PMR_for_classification_240528.txt"
+
+## Measure time for matrix multiplication 
+tic("Total PMR calculation")
+tic("Reading genotypes")
+
+geno <- as.matrix(fread(gfile,sep=" ",header=F,data.table=FALSE))
+ind <- fread(ifile,sep="\t",header=F)
+colnames(ind) <- c("iid","sex","pid")
+
+pgeno <- as.matrix(fread(paste0(pfile,".geno.txt"),sep=" ",header=F,data.table=FALSE))
+pind <- fread(paste0(pfile,".ind"),sep="\t",header=F)
+colnames(pind) <- c("iid","sex","pid")
+
+toc() # end of reading genotypes
+
+# memory size of matrix 
+print(paste0("The size of genotype matrix : ",as.integer(object.size(geno)/1e6)," Mb") )
+
+# convert genotype matrix 
+tic("Matrix multiplication")
+# first, calculate nmismatch (shifted later)
+geno_c <- geno - 1 
+geno_c[geno_c %% 8 == 0] <- 0 # 9-1 as missing 
+pgeno_c <- pgeno - 1 
+pgeno_c[pgeno_c %% 8 == 0] <- 0 # 9-1 as missing 
+
+count_matrix <- t(geno_c) %*% pgeno_c
+
+# second, calculate nsnps by each individual pairs 
+geno[geno == 0|geno == 2] <- 1
+geno[geno == 9] <- 0
+pgeno[pgeno == 0|pgeno == 2] <- 1
+pgeno[pgeno == 9] <- 0
+
+nsnp_matrix <- t(geno) %*% pgeno
+
+# Third, combine it to calculate pmr 
+nmis_matrix <- -(1/2)*(count_matrix) + (1/2)*(nsnp_matrix)
+pmr_matrix <- nmis_matrix/nsnp_matrix
+
+toc() # end of matrix multiplication
+
+# maximum memory used 
+print(paste0("Maximum memory used : ",as.integer(gc()[2,6])," Mb") )
+
+# convert to data table 
+tic("Coverting into data table")
+iid1_vec <- c(); iid2_vec <- c(); pid1_vec <- c(); pid2_vec <- c()
+nsnp_vec <- c(); nmis_vec <- c(); pmis_vec <- c()
+
+for (i in 1:nrow(ind))  { 
+    for (j in 1:nrow(pind))  { 
+        # unique indivs pairs
+        iid1 <- as.character(ind$iid[i]) ; pid1 <- as.character(ind$pid[i])
+        iid2 <- as.character(pind$iid[j]) ; pid2 <- as.character(pind$pid[j])
+
+        # add to vector 
+        iid1_vec <- c(iid1_vec,iid1); iid2_vec <- c(iid2_vec,iid2); pid1_vec <- c(pid1_vec,pid1); pid2_vec <- c(pid2_vec,pid2)
+        nsnp_vec <- c(nsnp_vec,nsnp_matrix[i,j]); nmis_vec <- c(nmis_vec,nmis_matrix[i,j]); pmis_vec <- c(pmis_vec,pmr_matrix[i,j])
+    }
+}
+
+toc() # end of converting
+
+# write output file 
+tic("Writing")
+
+df <- data.frame(cbind(iid1_vec,pid1_vec,iid2_vec,pid2_vec,nsnp_vec,nmis_vec,pmis_vec))
+colnames(df) <- c("IID1","PID1","IID2","PID2","nsnp","nmismatch","pmismatch")
+
+df[df$pmismatch==NaN,6] <- NA 
+df[df$pmismatch==NaN,7] <- NA 
+
+write.table(df, file=of1, quote=F, sep="\t", row.names=F)
+
+toc() # end of writing 
+
+toc() # end of commands
+
+
+#####################################################################
+#### 2. Empirical esimates of false classification rate of taxon ####
+#####################################################################
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/Classification_240526/
+
+pt1=($(pwd)"/")
+fn1=${pt1}"Test_50M.emp.False_classification_rate.txt"
+of1=${pt1}"Test_50M.emp.False_classification_rate_table.txt"
+scf1=${pt1}"identification_simulation.R"
+
+sps="aAST ASA DOY WAB GOA CHI"
+cps="aAST ASA DOY WAB GOA CHI GAU"
+echo -e "Origin\tCompared\tn_10\tn_50\tn_100\tn_500\tn_2000" > ${of1} 
+
+for sp in ${sps}; do 
+    for cp in ${cps}; do 
+        if [[ "$sp" != "$cp" ]]; then 
+            rates=""
+            for n in 10 50 100 500 2000; do 
+                rate=($(awk -v sp=$sp -v n=$n -v cp=$cp '{if ($2==sp && $4==cp && $3==n) print $5}' ${fn1}))
+                if [ "$rates" == "" ]; then rates=$rate; else rates+=" "${rate}; fi 
+            done 
+            echo ${sp} ${cp} ${rates} |sed s/" "/"\t"/g >> ${of1}
+        fi
+        echo $sp $cp is finished
+    done 
+done 
+
+fn2=${pt1}"Test_50M.emp.Taxon_false_identification_rate_241001_v2.txt"
+of2=${pt1}"Test_50M.emp.Taxon_false_identification_rate_table_v2_241001.txt"
+
+echo -e "Origin_species\tTaxon\tn_10\tn_15\tn_20\tn_50\tn_100\t_n_150\tn_500\tn_1000\tn_2000\tn_3000" > ${of2}
+
+while read sp tax; do
+    rates=""
+    for n in 10 15 20 50 100 150 500 1000 2000 3000; do
+        rate=($(awk -v sp=$sp -v n=$n -v tax=$tax '{if ($1==sp && $2==tax && $3==n) print $4}' ${fn2} ))
+        if [ "$rates" == "" ]; then rates=$rate; else rates+=" "${rate}; fi
+    done
+    echo ${sp} ${tax} ${rates} |sed s/" "/"\t"/g >> ${of2}
+done < <(tail -n +2 ${fn2}|cut -f1,2|uniq)
+
+
+#######################################################################################################
+################ save the following script as "identification_simulation.R" ###########################
+
+#!/home/donghee_kim/.conda/envs/Admixtools/bin/Rscript
+
+rm=list()
+
+library(ggplot2)
+library(data.table)
+library(tictoc)
+library(gridExtra)
+
+# random sampling function
+sample_and_pmr <- function(idx_set,geno_idx,panel,geno,nsnp) {
+    if (nsnp >= 0) {
+        new_idx = sort(sample(idx_set,nsnp,replace=F))
+
+        # extract panel genotypes matching sampled index
+        eff_panel <- panel[new_idx,]
+        eff_geno <- geno[new_idx,geno_idx]
+
+        ## Calculate PMR
+        # convert genotype matrix
+        # first, calculate nmismatch (shifted later)
+        panel_c <- eff_panel - 1
+        panel_c[panel_c %% 8 == 0] <- 0 # 9-1 as missing
+        geno_c <- eff_geno - 1
+        geno_c[geno_c %% 8 == 0] <- 0 # 9-1 as missing
+
+        count_matrix <- t(panel_c) %*% geno_c
+
+        # second, calculate nsnps by each individual pairs
+        eff_panel[eff_panel == 0|eff_panel == 2] <- 1
+        eff_panel[eff_panel == 9] <- 0
+        eff_geno[eff_geno == 0|eff_geno == 2] <- 1
+        eff_geno[eff_geno == 9] <- 0
+
+        nsnp_matrix <- t(eff_panel) %*% eff_geno
+
+        # Third, combine it to calculate pmr
+        nmis_matrix <- -(1/2)*(count_matrix) + (1/2)*(nsnp_matrix)
+        pmr_matrix <- nmis_matrix/nsnp_matrix
+
+        return(pmr_matrix)
+    }
+    else { 
+        # extract panel genotypes matching sampled index
+        eff_panel <- panel
+        eff_geno <- geno
+
+        ## Calculate PMR
+        # convert genotype matrix
+        # first, calculate nmismatch (shifted later)
+        panel_c <- eff_panel - 1
+        panel_c[panel_c %% 8 == 0] <- 0 # 9-1 as missing
+        geno_c <- eff_geno - 1
+        geno_c[geno_c %% 8 == 0] <- 0 # 9-1 as missing
+
+        count_matrix <- t(panel_c) %*% geno_c
+
+        # second, calculate nsnps by each individual pairs
+        eff_panel[eff_panel == 0|eff_panel == 2] <- 1
+        eff_panel[eff_panel == 9] <- 0
+        eff_geno[eff_geno == 0|eff_geno == 2] <- 1
+        eff_geno[eff_geno == 9] <- 0
+
+        nsnp_matrix <- t(eff_panel) %*% eff_geno
+
+        # Third, combine it to calculate pmr
+        nmis_matrix <- -(1/2)*(count_matrix) + (1/2)*(nsnp_matrix)
+        pmr_matrix <- nmis_matrix/nsnp_matrix
+    }
+}
+
+rn1 <- "./panel/Cattle_panel"
+fn1 <- "./bos.50M.highcov"
+
+# panel genotypes
+panel = as.matrix(fread(paste0(rn1,".geno.txt"),header=F,data.table=FALSE))
+panel_info = fread(paste0(rn1,".ind"),header=F,data.table=FALSE)
+species <- c("AST","CHI","SAI","GAU","WAB","GOA","aAST","ASA","DOY")
+included <- c("CHI","WAB","GOA","aAST","ASA","DOY")
+panel <- panel[,which(species %in% included)]
+
+# target genotypes 
+geno = as.matrix(fread(paste0(fn1,".geno.txt"),header=F,data.table=FALSE))
+ind = read.table(paste0(fn1,".ind"),header=F)
+geno <- geno[,-6]
+iids <- ind[,-6] # exclude LEI01 
+pids <- c("aAST","ASA","DOY","WAB","GOA","CHI")
+
+# parameters
+snp_vec <- c(10,15,20,50,100,150,500,1000,2000,3000)
+iter <- 10000
+
+# False taxon classification rate
+# Outgroup of Bovini
+taxon_list <- list(c("GOA"),c("aAST","ASA","DOY","WAB","CHI"),c("WAB"),c("aAST","ASA","DOY","CHI"),c("DOY"),c("aAST","ASA","CHI"),c("CHI"),c("aAST","ASA"),c("aAST"),c("ASA"))
+taxon_names <- c("Outgroup","Bovini","Bubalus","Bos","Bos_grunniens","Cattle","Bos_indicus","taurine_or_aurochs","Bos_taurus","Bos_primigenius")
+
+p_vec <- c(); t_vec <- c(); n_vec <- c(); f_vec <- c()
+
+for (tax_num in 1:length(taxon_list)) {
+    taxon <- taxon_list[[tax_num]]
+    taxon_name <- taxon_names[tax_num]
+    taxon_idx <- which(included %in% taxon)
+
+    for (pop in taxon) {
+        i <- which(pids == pop)
+        idx_set = which(geno[,i]!=9)
+        for (nsnp in snp_vec) {
+            fp <- 0
+            for (inum in 1:iter) {
+                pmr_vector <- as.vector(sample_and_pmr(idx_set,i,panel,geno,nsnp))
+
+                p0 <- min(pmr_vector[taxon_idx]) ; p1 <- min(pmr_vector[-taxon_idx]) # minimum pmr within taxon, outside taxon
+                fp = fp + (p0 >= p1)
+            }
+            p_vec <- c(p_vec,pop); t_vec <- c(t_vec,taxon_name); n_vec <- c(n_vec,nsnp); f_vec <- c(f_vec,fp/iter)
+            print(paste0(pop," ",taxon_name," SNP=",nsnp," is finished.", fp))
+        }
+    }
+}
+
+df <- data.frame(cbind(p_vec,t_vec,n_vec,f_vec))
+colnames(df) <- c("species","taxon","nSNP","false_identification_rate")
+
+of1 <- "Test_50M.emp.Taxon_false_identification_rate_241001_v2"
+write.table(df, file=paste0(of1,".txt"), quote=F, sep="\t", row.names=F)
+
+df <- read.table(paste0(of1,".txt"),header=T)
+
+# plot 
+theme_custom <-  theme_bw() +
+  theme(axis.text.y=element_text(size=24, color="black"),
+        axis.text.x=element_text(size=24, color="black",angle=45, vjust=0.6),
+        axis.title.x= element_text(size=30, face="bold", vjust=-3),
+        axis.title.y= element_text(size=30, face="bold", vjust=5),
+        axis.ticks.y = element_line(size=1.5),
+        axis.ticks.x = element_line(size=1.5),
+        axis.ticks.length = unit(.4, "cm"),
+        plot.title = element_text(size = 48,face="bold", hjust=0.5),
+        legend.text = element_text(size=24, face="bold"),
+        legend.title = element_text(size=28, face="bold"),
+        #legend.position = "none",
+        plot.margin = unit(c(1.5,1,1.5,1), "cm" ))
+
+pdf.name <- paste0(of1,".pdf")
+pdf( file=pdf.name, width =42, height = 40)
+
+taxon_names <- c("Outgroup","Bovini","Bubalus","Bos","Bos_grunniens","Cattle","Bos_indicus","taurine_or_aurochs","Bos_taurus","Bos_primigenius")
+snp_vec <- c(10,15,20,50,100,150,500,1000,2000,3000)
+colvec <- c("Brown","Green","Blue","Cyan","Purple","Dark Green","Khaki")
+plist <- c("aAST","ASA","CHI","DOY","GAU","GOA","WAB")
+pname <- c("Taurine","Aurochs","Indicine","Yak","Gaur","Goat","Water Buffalo")
+p1 <- list()
+
+for (i in 1:length(taxon_names)) {
+    taxon_name <- taxon_names[i]
+    df2 <- subset(df,taxon==taxon_name)
+
+    df2$false_identification_rate <- as.numeric(df2$false_identification_rate)
+    df2$nSNP <- factor(df2$nSNP, levels = snp_vec)
+
+    xlabs <- "Number of SNPs"
+    ylabs <- "Taxon false identification rate"
+
+    p1[[i]] <- ggplot(df2, aes(x=nSNP, y=false_identification_rate, fill=species) )+
+        geom_point(shape=24,size=10) +
+        #geom_line(aes(color=species)) +
+        geom_hline(aes(yintercept=0.05), linetype="dashed", color='red', size=1) +
+        annotate("text", x=1, y=0.07, label="p = 0.05", fontface="bold",size=6) +
+
+        guides(fill=guide_legend(title="Origin species")) +
+        scale_fill_manual(values = colvec, breaks = plist, labels = pname) +
+         scale_x_discrete(breaks = df2$nSNP) +
+
+        ylim(c(0,1)) +
+        #xlim(c(0,200)) +
+        # Add labels and title
+        labs(x=xlabs,y=ylabs,title=taxon_name) + theme_custom
+}
+
+do.call(grid.arrange, c(p1, ncol=3))
+
+dev.off()
+
+
+## False identification rate of indicine using distance on PMR plane 
+## point plot PMR(taurine,indicine) vs PMR(indicine,indicine)
+pmr_result <- sample_and_pmr(0,0,panel,geno,-1) # row = panel, column = test geno
+
+i0 <- pmr_result[which(included=="CHI"), which(pids=="CHI")] # mismatch rate of ind with indicine 
+i1 <- pmr_result[which(included=="aAST"), which(pids=="CHI")] # mismatch rate of ind with taurine 
+
+t0 <- pmr_result[which(included=="CHI"), which(pids=="aAST")] # mismatch rate of tau with indicine 
+t1 <- pmr_result[which(included=="aAST"), which(pids=="aAST")] # mismatch rate of tau with taurine 
+
+a0 <- pmr_result[which(included=="CHI"), which(pids=="ASA")] # mismatch rate of aurochs with indicine 
+a1 <- pmr_result[which(included=="aAST"), which(pids=="ASA")] # mismatch rate of aurochs with taurine 
+
+snp_vec <- c(100,200,500,600,700,1000)
+iter <- 1e4
+
+p_vec <- c(); t_vec <- c(); n_vec <- c(); f_vec <- c() 
+s_vec <- c(); i0_vec <- c(); i1_vec <- c()
+
+pop <- "CHI"; taxon_name <- "Bos_indicus" 
+i <- which(pids == pop)
+idx_set = which(geno[,i]!=9)
+
+for (nsnp in snp_vec) {
+    fp <- 0
+    for (inum in 1:iter) {
+        pmr_vector <- as.vector(sample_and_pmr(idx_set,i,panel,geno,nsnp))
+        p0 <- pmr_vector[which(included=="CHI")] ; p1 <- pmr_vector[which(included=="aAST")] # pmr with indicine, taurine 
+        d0 <- (p0-i0)**2 + (p1-i1)**2  ; d1 <- (p0-t0)**2 + (p1-t1)**2
+        fp = fp + (d0 == min(d0,d1,d2)) 
+        s_vec <- c(s_vec,nsnp) ; i0_vec <- c(i0_vec,p0); i1_vec <- c(i1_vec,p1)
+    }
+    p_vec <- c(p_vec,pop); t_vec <- c(t_vec,taxon_name); n_vec <- c(n_vec,nsnp); f_vec <- c(f_vec,fp/iter)
+    print(paste0(pop," "," SNP=",nsnp," is finished. ", fp/iter))
+}
+
+pop <- "aAST"; taxon_name <- "Bos_taurus" 
+i <- which(pids == pop)
+idx_set = which(geno[,i]!=9)
+
+t0_vec <- c(); t1_vec <- c()
+for (nsnp in snp_vec) {
+    fp <- 0
+    for (inum in 1:iter) {
+        pmr_vector <- as.vector(sample_and_pmr(idx_set,i,panel,geno,nsnp))
+        p0 <- pmr_vector[which(included=="CHI")] ; p1 <- pmr_vector[which(included=="aAST")] # pmr with indicine, taurine 
+        d0 <- (p0-i0)**2 + (p1-i1)**2  ; d1 <- (p0-t0)**2 + (p1-t1)**2 ; d2 = (p0-a0)**2 + (p1-a1)**2
+        fp = fp + (d0 == min(d0,d1,d2)) 
+        t0_vec <- c(t0_vec,p0); t1_vec <- c(t1_vec,p1)
+    }
+    p_vec <- c(p_vec,pop); t_vec <- c(t_vec,taxon_name); n_vec <- c(n_vec,nsnp); f_vec <- c(f_vec,fp/iter)
+    print(paste0(pop," "," SNP=",nsnp," is finished. ", fp/iter))
+}
+
+pop <- "ASA"; taxon_name <- "Bos_primigenius" 
+i <- which(pids == pop)
+idx_set = which(geno[,i]!=9)
+
+for (nsnp in snp_vec) {
+    fp <- 0
+    for (inum in 1:iter) {
+        pmr_vector <- as.vector(sample_and_pmr(idx_set,i,panel,geno,nsnp))
+        p0 <- pmr_vector[which(included=="CHI")] ; p1 <- pmr_vector[which(included=="aAST")] # pmr with indicine, taurine 
+        d0 <- (p0-i0)**2 + (p1-i1)**2  ; d1 <- (p0-t0)**2 + (p1-t1)**2; ; d2 = (p0-a0)**2 + (p1-a1)**2
+        fp = fp + (d0 == min(d0,d1,d2)) 
+    }
+    p_vec <- c(p_vec,pop); t_vec <- c(t_vec,taxon_name); n_vec <- c(n_vec,nsnp); f_vec <- c(f_vec,fp/iter)
+    print(paste0(pop," "," SNP=",nsnp," is finished. ", fp/iter))
+}
+
+df <- data.frame(cbind(p_vec,t_vec,n_vec,f_vec))
+colnames(df) <- c("species","taxon","nSNP","false_identification_rate")
+of1 <- "Test_50M.emp.pmr_distance_indicine_241001"
+write.table(df, file=paste0(of1,".txt"), quote=F, sep="\t", row.names=F)
+
+df2 <- data.frame(cbind(s_vec,i0_vec,i1_vec,t0_vec,t1_vec))
+colnames(df2) <- c("nSNP","I0","I1","T0","T1")
+
+pdf.name <- paste0(of1,".pdf")
+pdf( file=pdf.name, width =30, height = 20)
+
+xlabs <- "PMR with Bos indicus"
+ylabs <- "PMR with Bos taurus"
+
+p1 <- list()
+a1 <- (i0-t0)/(t1-i1)
+b1 <- -a1*(t0+i0)/2 + (t1+i1)/2
+
+for (j in 1:length(snp_vec)) { 
+    snp <- snp_vec[j] 
+    df3 <- subset(df2, nSNP==snp)
+
+    title <- paste0(snp, "SNPs")
+
+    p1[[j]] <- ggplot(df3, aes(x=I0, y=I1) )+
+    geom_point(shape=21,color="skyblue") +
+    geom_point(aes(x=T0,y=T1),shape=21,color="orange") +
+    geom_point(x=i0,y=i1, shape=4, color = 'blue', size = 5, stroke = 2) +
+    geom_point(x=t0,y=t1, shape=4, color = 'red', size = 5, stroke = 2) +
+    geom_abline(slope=1,intercept=0, linetype="dashed",linewidth=1.5) + 
+    geom_abline(slope=a1,intercept=b1, linetype="dashed",linewidth=1.5) + 
+
+    xlim(c(0,0.1)) + ylim(c(0,0.1)) +
+    annotate("text", x=0.075, y=0.085, label="y = x", fontface="bold",size=7) +
+    annotate("text", x=0.070, y=0.036, label="Middle", fontface="bold",size=7) +
+    # Add labels and title
+    labs(x=xlabs,y=ylabs,title=title) + theme_custom
+    #print(p1[[j]])
+}
+
+do.call(grid.arrange, c(p1, ncol=3))
+
+dev.off()

@@ -1,0 +1,698 @@
+###########################
+#### 1. Moment test  ######
+###########################
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/
+mkdir -p moments_250407; cd moments_250407
+
+############## 
+
+~/.conda/envs/Admixtools/bin/R
+
+rm = list()
+library(admixtools)
+library(tidyverse)
+library(gridExtra)
+
+fn1 <- "/data2/PubData/Gunter2025Elife/analysis/genotypes/Bos.5688K.auto.250305"
+info <- read.table("./aurochs_info.txt",sep="\t",header=T)
+
+aus <- info$PID
+
+exc <- c("Holocene Balkans","Pleistocene Italy","Holocene Italy")
+aus <- info$PID[!(info$Group %in% exc)]
+
+# pch/color 
+acols = c("red", "green", "yellow", "blue", "orange", "purple", "cyan", "magenta", "darkolivegreen1",
+  "pink", "aquamarine4", "lavender", "brown", "beige", "aquamarine1", "maroon",
+  "darkgoldenrod2", "coral", "navy", "grey", "black")
+grporder <- unique(sort(info$Group))
+
+## 1. Outgroup f3 
+of1 <- "./f3_aurochs.5688K.250417"
+pop1 <- "AfricanBuffalo"
+pop2 <- aus
+pop3 <- aus
+df <- subset(f3(fn1,pop1,pop2,pop3, auto_only=F, poly_only=F, blgsize=5e6, outgroupmode=T), pop2!=pop3)
+
+## write down table
+table.name <- paste0(of1, ".txt")
+write.table(df, file=table.name, quote=F, sep="\t", row.names=F)
+
+## plot 
+library(gplots)
+
+d1 <- read.table(paste0(of1, ".txt"),header=T)
+p1s <- unique(d1$pop2)
+
+exc <- c("Uralsk1","ROS002","NVL3") # low-coverage 
+d1 <- subset(d1, !(pop2 %in% exc) & !(pop3 %in% exc))
+p1s <- unique(d1$pop2)
+
+## Create a dissimilarity matrix (f3)
+smat1 = matrix(nrow=length(p1s), ncol=length(p1s))
+for (p1 in p1s) {
+  inum = which(p1s == p1) ## where sample is in sample vector
+  tfv1 = as.vector(d1$pop2) == p1 | as.vector(d1$pop2) == p1 ## True or False where sample is in data
+  tv1 = as.vector(d1$est)[tfv1] ## f3
+  tv2 = rep(NA, length(p1s))
+  tv2[setdiff(1:length(p1s), inum)] = tv1 ## exclude itself
+  smat1[,inum] = tv2
+}
+
+## plotting
+pdf(file=paste0(of1,".heatmap.pdf"), height=10, width=10)
+heatmap.2(smat1, labRow=p1s, labCol=p1s, trace='none', cexRow=1.2,cexCol=1.2, margins=c(10,10),symm=TRUE)
+dev.off()
+
+pop1 <- "AfricanBuffalo"
+pop2 <- c("Anatolia_Neolithic","Sahiwal")
+pop3 <- c("Shuangta_EN")
+pop4 <- c("Houtaomuga_LN","Honghe_LNBA")
+df <- subset(f4(fn1,pop1,pop2,pop3,pop4, auto_only=F, poly_only=F, blgsize=5e6), pop3!=pop4 & pop2!=pop3 & pop2!=pop4)
+df
+
+## 2. f4 (Outgroup, Sahiwal; Anatolia_Neolithic, other western aurochs)
+of1 <- "./f4_ind_diff.5688K.250407"
+pop1 <- "AfricanBuffalo"
+pop2 <- c("Sahiwal")
+pop3 <- aus
+pop4 <- c("Anatolia_Neolithic")
+df <- subset(f4(fn1,pop1,pop2,pop3,pop4, auto_only=F, poly_only=F, blgsize=5e6), pop3!=pop4 & pop2!=pop3 & pop2!=pop4)
+#df <- read.table(paste0(of1,".txt"),header=T)
+
+df <- subset(df,pop3!=pop4 & pop2!=pop3 & pop2!=pop4 )
+
+## write down table
+table.name <- paste0(of1, ".txt")
+write.table(df, file=table.name, quote=F, sep="\t", row.names=F)
+
+df <- read.table(paste0(of1, ".txt"), header=T)
+colnames(df)[colnames(df)=="pop3"] <- "PID"
+df <- merge(df,info,by="PID")
+
+## plot
+outname <- "African Buffalo"
+
+pdf.name <- paste0(of1,".pdf")
+pdf( file=pdf.name, width =8, height = 8, colormodel="cmyk")
+
+for (k in 1:length(pop2)) {
+    au <- pop2[k]
+
+    # subset 
+    f4sorted <- subset(df, pop2==au)
+
+    # write xlab  
+    xlabs <- paste0("f4( ", outname, ", ",au, "; X, Anatolia_Neolithic )" )
+
+    # Create a bar plot with error bars using ggplot2
+    plt <- ggplot(f4sorted, aes(x=est, y=reorder(PID,est), fill=Group )) +
+                geom_pointrange(aes(xmin=est-3*est/z, xmax=est+3*est/z),size=1.0, linewidth=1.0, shape=21) + 
+                geom_vline(xintercept = 0,linetype = "dashed", color = "black", linewidth = 1.5) +
+
+                # Add labels and title
+                labs(x=xlabs,y="" ) +
+                scale_fill_manual(values = acols, breaks = grporder) + # Use custom colors
+
+                # Set theme and axis limits
+                theme_bw() + 
+
+                # Change appearance of y-axis text
+                theme(axis.text.y=element_text(size=11, color="black"),  
+                axis.text.x=element_text(size=13, face="bold", color="black"), 
+                axis.title.x= element_text(size=15, face="bold"),
+                #legend.position = "none",
+                plot.margin = unit(c(1,1,3,1), "cm" ))
+
+    print(plt)
+}
+
+dev.off()
+
+#####################################################
+##### 2. qpWave - East Asian aurochs continuity #####
+#####################################################
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/
+mkdir -p qpWave_250508; cd qpWave_250508
+
+pt1=($(pwd)"/")
+fn1="/data2/PubData/Gunter2025Elife/analysis/genotypes/Bos.5688K.auto.250305"
+lst1="/data2/projects1/AnimalsChina/sample_info/Bos/JLU_cattle_pop_info_250408.txt"
+lst2=${pt1}"EastAsian_aurochs_list.txt"
+scf1="/home/donghee_kim/script/qpAdm_array.sh"
+listf=${pt1}"qpAdm_array_list.txt"
+
+## Target groups 
+awk -F"\t" '$2=="group A"{print $1}' ${lst1} > temp1
+sort temp1 > ${lst2}
+
+while read pop; do mkdir -p ${pop} ;done < ${lst2}
+
+## Define sets of outgroups you would like to test
+og1s="AfricanBuffalo Sahiwal CPC98 Gyu2 Anatolia_Neolithic Tula1 Baikal1"
+
+## Write down sets of outgroups
+echo ${og1s} | sed s/" "/"\n"/g > OG1.pops 
+
+## Write down sets of references
+k=1
+for s1 in Honghe_LNBA Hongliang_LN Houtaomuga_LN Shuangta_EN Yangguanzhai_LN; do 
+    echo ${s1}| sed s/" "/"\n"/g > REF${k}.pops
+    let k+=1
+done 
+
+## run qpAdm
+if [[ -f "$listf" ]]; then rm ${listf}; fi 
+for right in OG*.pops; do
+    for left in REF*.pops; do
+        echo ${left} ${right} >> ${listf}
+    done
+done 
+
+
+maxm=28000
+CMD=${scf1}" "${fn1}" "${lst2}" "${listf}" "${maxm}
+
+idnmax=($(wc -l ${listf}))
+nperrun=4
+
+sbatch --array=1-${idnmax}%${nperrun} -c 8 --mem 30000 -p amd --wrap="$CMD"
+
+########################################################
+#### write the following script as "qpAdm_array.sh" ####
+
+#!/bin/bash
+
+fn1=$1
+lst2=$2
+listf=$3
+maxm=$4
+inum=$SLURM_ARRAY_TASK_ID
+
+pt1=($(pwd)"/")
+scf1="/home/donghee_kim/script/qpAdm_per_group.R"
+
+left=($(awk -v inum=$inum '{if (NR==inum) print $1}' ${listf}))
+right=($(awk -v inum=$inum '{if (NR==inum) print $2}' ${listf}))
+
+overlap=($(fgrep -wf ${left} ${right}))
+
+if [[ "$overlap" == "" ]]; then /home/donghee_kim/.conda/envs/Admixtools/bin/Rscript ${scf1} ${fn1} ${lst2} ${left} ${right} ${maxm} ${pt1} ; fi
+
+###########################################################
+#### write the following script as "qpAdm_per_group.R" ####
+
+#!/bin/bash
+
+fn1=$1
+lst2=$2
+listf=$3
+maxm=$4
+inum=$SLURM_ARRAY_TASK_ID
+
+pt1=($(pwd)"/")
+scf1="/home/donghee_kim/script/qpAdm_per_group.R"
+
+left=($(awk -v inum=$inum '{if (NR==inum) print $1}' ${listf}))
+right=($(awk -v inum=$inum '{if (NR==inum) print $2}' ${listf}))
+
+overlap=($(fgrep -wf ${left} ${right}))
+
+if [[ "$overlap" == "" ]]; then /home/donghee_kim/.conda/envs/Admixtools/bin/Rscript ${scf1} ${fn1} ${lst2} ${left} ${right} ${maxm} ${pt1} ; fi
+[donghee_kim@snupopgen1 qpGraph_250407]$ scf1="/home/donghee_kim/script/qpAdm_per_group.R"
+[donghee_kim@snupopgen1 qpGraph_250407]$ cat $scf1
+#!/home/donghee_kim/.conda/envs/Admixtools/bin/Rscript
+
+rm = list()
+library(admixtools)
+library(tidyverse)
+library(readr)
+
+args = commandArgs(trailingOnly=TRUE)
+
+## read input file
+fn1 <- args[1]
+lst1 <- args[2]
+left <- args[3] ; lname <- gsub("\\.pops", "", left)
+right <- args[4] ; rname <- gsub("\\.pops", "", right)
+maxm <- as.integer(args[5])
+pt1 <- args[6]
+
+## specify population
+target <- read.table(lst1, header=F)$V1
+left <- read.table(left, header=F)$V1
+right <- read.table(right, header=F)$V1
+
+## calculate f2 block together
+## If your target population have many missing snps, you should do it separately
+
+## qpAdm
+for (i in 1:length(target)) {
+  if ( !(target[i] %in% left) & !(target[i] %in% right) ) {
+    mypops <- c(target[i],left,right)
+    f2_blocks <- f2_from_geno(fn1, pops=mypops, auto_only=F, blgsize=5e6, poly_only=F, maxmem=maxm)
+
+    of1 <- paste0(pt1, target[i], '/', target[i], '.', rname, '.', lname) ## output prefix
+    out <- qpadm(f2_blocks, left,  right, target[i], fudge=1e-9) ## fudge ~ 1e-9 terms make result close to qpAdm old result.
+
+    ## f4
+    f4name <- paste0(of1,'.f4.tsv') ; write_tsv(out$f4, f4name)
+
+    ## popdrop
+    pdname <- paste0(of1,'.popdrop.tsv') ; write_tsv(out$popdrop, pdname)
+
+    ## weights
+    wgname <- paste0(of1,'.weights.tsv') ; write_tsv(out$weights, wgname)
+
+    ## rankdrop
+    rdname <- paste0(of1,'.rankdrop.tsv') ; write_tsv(out$rankdrop, rdname)
+  }
+}
+
+
+####################################################
+## Extract qpAdm results into a single table     ##
+## Run this after finishing qpAdm job runs above  ##
+###############################################
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/qpWave_250508
+
+pt1=($(pwd)"/")
+lst1=${pt1}"EastAsian_aurochs_list.txt"
+
+## Target groups
+targets=""
+while read pop; do
+    targets+=${pop}" "
+done < ${lst1}
+
+of1="AncientChina.aurochs.qpAdm.summary.250508.txt"
+
+onum=($(ls OG*.pops | wc -l))
+rnum=($(ls REF*.pops | wc -l))
+
+paste OG* > outgroup.txt 
+
+#####################################
+## Extract qpAdm key summary data  ##
+
+hv="Target OG nRef Refs P-value SSE Coeff1 Coeff2 Coeff3 SE1 SE2 SE3"; echo ${hv} > ${of1}
+for P in ${targets}; do for K in $(seq 1 $onum); do for J in $(seq 1 ${rnum}); do 
+    refv=($(head -n 1 REF${J}.pops)) ; while read pop ; do refv+=";"${pop} ; done < <(tail -n +2 REF${J}.pops)
+    pnum=($(wc -l REF${J}.pops))
+    prefix="./"${P}"/"${P}".OG"${K}".REF"${J}
+    pd1=${prefix}".popdrop.tsv" ; rd1=${prefix}".rankdrop.tsv"
+    f4=${prefix}".f4.tsv" ; wg1=${prefix}".weights.tsv"
+
+    if [ ! -f "$pd1" ]; then continue; fi
+    nref=($(echo ${refv} | awk 'BEGIN {FS=";"} {print NF}'))
+    pval=($(head -n 2 ${rd1} | tail -1 | awk '{print $4}'))  ## qpAdm p-value
+    co1=($(head -n 2 ${wg1} | tail -1 | awk '{printf ("%.3f", $3)}' )) ; co2=($(head -n 3 ${wg1} | tail -1 | awk '{printf ("%.3f", $3)}' )) ## Coefficients
+    se1=($(head -n 2 ${wg1} | tail -1 | awk '{printf ("%.3f", $4)}' )) ; se2=($(head -n 3 ${wg1} | tail -1 | awk '{printf ("%.3f", $4)}' )) ## SEs
+    if [ "$pnum" == 3 ]; then 
+        co3=($(head -n 4 ${wg1} | tail -1 | awk '{printf ("%.3f", $3)}' )) ## Coefficients
+        se3=($(head -n 4 ${wg1} | tail -1 | awk '{printf ("%.3f", $4)}' ))
+    else 
+        co3="NA"; se3="NA"
+    fi 
+    SSEs=($(awk 'BEGIN {sse=0.0} {if ($2 ~ /fit/) sse+=$5*$5} END {print sse}' ${f4}))  ## sum of squared errors
+    echo ${P}" OG"${K}" "${J}" "${refv}" "${pval}" "${SSEs}" "${co1}" "${co2}" "${co3}" "${se1}" "${se2}" "${se3} >> ${of1}
+done; done; echo ${P}" is processed"; done
+
+##########################################################################
+##### 3. qpAdm - YR_LNBA : Early taurine + East Asian/Steppe aurochs #####
+##########################################################################
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/
+mkdir -p qpAdm_250408; cd qpAdm_250408
+
+pt1=($(pwd)"/")
+fn1="/data2/PubData/Gunter2025Elife/analysis/genotypes/Bos.5688K.auto.250305"
+lst1="/data2/projects1/AnimalsChina/sample_info/Bos/JLU_cattle_pop_info_250408.txt"
+lst2=${pt1}"EastAsian_taurine_list.txt"
+scf1="/home/donghee_kim/script/qpAdm_per_group.R"
+scf2=${pt1}"qpAdm_array.sh"
+listf=${pt1}"qpAdm_array_list.txt"
+
+## Target groups 
+awk -F"\t" '$2=="group B"{print $1}' ${lst1} > temp1
+echo "Shimao_LN1 Xiaohe Jirentai_BA1 NizhnyayaSooru.SG" |sed s/" "/"\n"/g >> temp1 
+sort temp1 > ${lst2}
+rm temp1
+
+while read pop; do mkdir -p ${pop} ;done < ${lst2}
+
+## Define sets of outgroups you would like to test
+og1s="AfricanBuffalo Sahiwal Rhi2 CPC98 Gyu2 Tula1"
+og2s=${og1s}" Baikal1"
+og3s=${og1s}" Shuangta_EN"
+og4s=${og1s}" Borly4b"
+og5s=${og1s}" Var1"
+og6s=${og1s}" Derkul.SG"
+
+## Write down sets of outgroups
+echo ${og1s} | sed s/" "/"\n"/g > OG1.pops 
+echo ${og2s} | sed s/" "/"\n"/g > OG2.pops 
+echo ${og3s} | sed s/" "/"\n"/g > OG3.pops 
+echo ${og4s} | sed s/" "/"\n"/g > OG4.pops
+echo ${og5s} | sed s/" "/"\n"/g > OG5.pops
+echo ${og6s} | sed s/" "/"\n"/g > OG6.pops
+
+## Write down sets of references
+k=1
+for s1 in Anatolia_Neolithic Balkans_Neolithic Iran_BronzeAge moo004.merged Mon4; do 
+    for s2 in Shuangta_EN Baikal1 Borly4b Var1 Derkul.SG; do 
+        echo ${s1} ${s2} | sed s/" "/"\n"/g > REF${k}.pops
+        let k+=1
+    done 
+done 
+
+## run qpAdm
+if [[ -f "$listf" ]]; then rm ${listf}; fi 
+for right in OG*.pops; do
+    for left in REF*.pops; do
+        echo ${left} ${right} >> ${listf}
+    done
+done 
+
+
+maxm=28000
+CMD=${scf2}" "${fn1}" "${lst2}" "${listf}" "${maxm}
+
+idnmax=($(wc -l ${listf}))
+nperrun=8
+
+sbatch --array=1-${idnmax}%${nperrun} -c 8 --mem 30000 -p amd --wrap="$CMD"
+
+
+for right in OG*.pops; do
+    for left in REF*.pops; do
+        overlap=($(fgrep -wf ${left} ${right}))
+        rname=($(echo ${right}|sed s/"\.pops"/""/g))
+        lname=($(echo ${left}|sed s/"\.pops"/""/g))
+        if [[ "$overlap" != "" ]]; then 
+            echo ${right} ${left} "yes"
+            rm */*.${rname}.${lname}.*
+        fi 
+    done
+done 
+
+
+####################################################
+## Extract qpAdm results into a single table     ##
+## Run this after finishing qpAdm job runs above  ##
+###############################################
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/qpAdm_250408
+
+pt1=($(pwd)"/")
+lst1=${pt1}"EastAsian_taurine_list.txt"
+
+## Target groups
+targets=""
+while read pop; do
+    targets+=${pop}" "
+done < ${lst1}
+
+of1="AncientChina.LNBA.qpAdm.summary.250408.txt"
+
+onum=($(ls OG*.pops | wc -l))
+rnum=($(ls REF*.pops | wc -l))
+
+#####################################
+## Extract qpAdm key summary data  ##
+
+hv="Target OG nRef Refs P-value SSE Coeff1 Coeff2 Coeff3 SE1 SE2 SE3"; echo ${hv} > ${of1}
+for P in ${targets}; do for K in $(seq 1 $onum); do for J in $(seq 1 ${rnum}); do 
+    refv=($(head -n 1 REF${J}.pops)) ; while read pop ; do refv+=";"${pop} ; done < <(tail -n +2 REF${J}.pops)
+    pnum=($(wc -l REF${J}.pops))
+    prefix="./"${P}"/"${P}".OG"${K}".REF"${J}
+    pd1=${prefix}".popdrop.tsv" ; rd1=${prefix}".rankdrop.tsv"
+    f4=${prefix}".f4.tsv" ; wg1=${prefix}".weights.tsv"
+
+    if [ ! -f "$pd1" ]; then continue; fi
+    nref=($(echo ${refv} | awk 'BEGIN {FS=";"} {print NF}'))
+    pval=($(head -n 2 ${rd1} | tail -1 | awk '{print $4}'))  ## qpAdm p-value
+    co1=($(head -n 2 ${wg1} | tail -1 | awk '{printf ("%.3f", $3)}' )) ; co2=($(head -n 3 ${wg1} | tail -1 | awk '{printf ("%.3f", $3)}' )) ## Coefficients
+    se1=($(head -n 2 ${wg1} | tail -1 | awk '{printf ("%.3f", $4)}' )) ; se2=($(head -n 3 ${wg1} | tail -1 | awk '{printf ("%.3f", $4)}' )) ## SEs
+    if [ "$pnum" == 3 ]; then 
+        co3=($(head -n 4 ${wg1} | tail -1 | awk '{printf ("%.3f", $3)}' )) ## Coefficients
+        se3=($(head -n 4 ${wg1} | tail -1 | awk '{printf ("%.3f", $4)}' ))
+    else 
+        co3="NA"; se3="NA"
+    fi 
+    SSEs=($(awk 'BEGIN {sse=0.0} {if ($2 ~ /fit/) sse+=$5*$5} END {print sse}' ${f4}))  ## sum of squared errors
+    echo ${P}" OG"${K}" "${J}" "${refv}" "${pval}" "${SSEs}" "${co1}" "${co2}" "${co3}" "${se1}" "${se2}" "${se3} >> ${of1}
+done; done; echo ${P}" is processed"; done
+
+######################
+##### 4-1. qpGraph #####
+######################
+
+cd /data2/projects1/AnimalsChina/analysis/Bos
+mkdir -p qpGraph_250407; cd qpGraph_250407
+mkdir -p topology 
+
+pt1=($(pwd)"/")
+
+
+###### topC-1.txt #########
+from to lower upper
+R AfricanBuffalo 0 1e4
+R Bos1 0 1e4
+Bos1 Bos2 0 1e4
+Bos2 Pre1 0 1
+Pre1 Pre2 0 1e4
+Pre2 Rhi2 0 1e4
+Pre2 Pre3 0 1e4
+Pre3 Post1 0 1
+Post1 Rhi3 0 1e4
+Bos1 Bos3 0 1e4 
+Bos3 ind1 0 1e4
+ind1 ind2 0 1
+ind2 Sahiwal 0 1e4
+Bos3 au1 0 1e4
+au1 au2 0 1e4
+au2 Tula1 0 1e4
+au2 au3 0 1e4 
+au3 au4 0 1
+au4 Shuangta_EN 0 1e4
+au1 eu1 0 1e4
+eu1 eu2 0 1e4
+eu2 Pre1 0 1
+eu1 me1 0 1e4
+me1 me11 0 1e4
+me11 me2 0 1e4
+me11 me12 0 1e4
+me12 Post1 0 1
+me1 mea1 0 1e4
+mea1 au4 0 1
+me2 Anatolia_Neolithic 0 1e4
+me2 me3 0 1e4
+me3 ind2 0 1
+
+###### topC-2.txt #########
+from to lower upper
+R AfricanBuffalo 0 1e4
+R Bos1 0 1e4
+Bos1 Bos2 0 1e4
+Bos2 Pre1 0 1
+Pre1 Pre2 0 1e4
+Pre2 Rhi2 0 1e4
+Pre2 Pre3 0 1e4
+Pre3 Post1 0 1
+Post1 Rhi3 0 1e4
+Bos1 Bos3 0 1e4 
+Bos3 ind1 0 1e4
+ind1 ind2 0 1
+ind2 Sahiwal 0 1e4
+Bos3 au1 0 1e4
+au1 au2 0 1e4
+au2 Tula1 0 1e4
+au2 au3 0 1e4 
+au3 au4 0 1
+au4 Shuangta_EN 0 1e4
+au1 eu1 0 1e4
+eu1 eu2 0 1e4
+eu2 Pre1 0 1
+eu1 me1 0 1e4
+me1 me11 0 1e4
+me11 me2 0 1e4
+me11 me12 0 1e4
+mea1 Post1 0 1
+me1 mea1 0 1e4
+me12 au4 0 1
+me2 Anatolia_Neolithic 0 1e4
+me2 me3 0 1e4
+me3 ind2 0 1
+
+###### topC-3.txt #########
+from to lower upper
+R AfricanBuffalo 0 1e4
+R Bos1 0 1e4
+Bos1 Bos2 0 1e4
+Bos2 Pre1 0 1
+Pre1 Pre2 0 1e4
+Pre2 Rhi2 0 1e4
+Pre2 Pre3 0 1e4
+Pre3 Post1 0 1
+Post1 Post2 0 1e4
+Post2 Rhi3 0 1e4
+Post2 Post3 0 1e4
+Post3 au4 0 1
+Bos1 Bos3 0 1e4 
+Bos3 ind1 0 1e4
+ind1 ind2 0 1
+ind2 Sahiwal 0 1e4
+Bos3 au1 0 1e4
+au1 au2 0 1e4
+au2 Tula1 0 1e4
+au2 au3 0 1e4
+au3 au4 0 1 
+au4 Shuangta_EN 0 1e4
+au1 eu1 0 1e4
+eu1 eu2 0 1e4
+eu2 Pre1 0 1
+eu1 me11 0 1e4
+me11 me2 0 1e4
+me11 me12 0 1e4
+me12 Post1 0 1
+me2 Anatolia_Neolithic 0 1e4
+me2 me3 0 1e4
+me3 ind2 0 1
+
+
+############# R ############
+
+~/.conda/envs/Admixtools/bin/R
+
+library(admixtools)
+library(tidyverse)
+
+fn1 <- "/data2/PubData/Gunter2025Elife/analysis/genotypes/Bos.5688K.auto.250305"
+maxm <- 8000
+
+## f2 
+mypops <- c("AfricanBuffalo","Sahiwal","Shuangta_EN","CPC98","Anatolia_Neolithic","Tula1","Rhi2")
+
+dt1 <- f2_from_geno(fn1,pops=mypops, maxmiss=0, auto_only = F, poly_only=F, blgsize=5e6, maxmem=maxm)
+
+## topology
+for (i in c("C-1","C-2","C-3","C-4")) {
+    tp1 <- paste0("./topology/top",i,".txt")
+    of1 <- paste0("top",i,"_qpG")
+    top1 <- read.table(tp1,header=T)
+    #top1$to <- gsub("Rhi3","CPC98",top1$to)
+    #top1$to <- gsub("Shuangta_EN","Gyu1",top1$to)
+
+    ## qpGraph 
+    qpresult1 <- qpgraph(dt1, top1, return_fstats = TRUE)
+
+    ## save the plot 
+    sc1 <- qpresult1$score 
+    wz1 <- qpresult1$worst_residual 
+    f41 <- qpresult1$f4 
+    f4sorted1 <- f41[order(-f41$z),] 
+    p1 <- as.vector(subset(f4sorted1, z == wz1)[1,1:4]) 
+
+    #png(file = paste0(of1,".png"), width = 8, height = 8, units = "in", res = 300)
+    pdf(file = paste0(of1,".pdf"), width = 8, height = 8)
+    p <- plot_graph(qpresult1$edge) + annotate("text", x=4.5, y=8.5, label=paste0("score: ", round(sc1 ,2)) ) + annotate("text", x=4.5, y=9, label=paste0("worst z score: ", round(wz1 ,2)) ) 
+        #annotate("text", x=3.5, y=7, label=paste0("score trained: ", round(res$score_test ,2)) )
+    print(p)
+    dev.off()
+
+    write.table(qpresult1$edge, file=paste0(of1,".edge.txt"), quote=F, sep="\t", row.names=F)
+    scoredf <- data.frame(round(sc1,2),round(wz1,2))
+    colnames(scoredf) <- c("score","worstz")
+    write.table(scoredf, file=paste0(of1,".score.txt"), quote=F, sep="\t", row.names=F)
+
+}
+
+
+##################################
+#### 4-2. plot with graphviz #####
+##################################
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/qpGraph_250407
+
+pt1=($(pwd)"/")
+sent=""
+
+for sc in C-2; do 
+    fn1=${pt1}"top"${sc}"_qpG.edge.dot"
+    of1=${pt1}"top"${sc}"_qpG_dot"
+    dot -Tpdf -Gsize=10,15  ${fn1} -o ${of1}.pdf
+    sent+=" "${of1}
+done 
+
+pdfunite ${sent} Bos.5688K.qpG.unite.pdf
+
+
+###### convert edge file to .dot file #####
+
+conda activate momi
+
+python
+
+import pandas as pd
+
+pop_list = ["AfricanBuffalo","CPC98","Anatolia_Neolithic","Sahiwal","Shuangta_EN","Rhi2","Tula1","Gyu1","Baikal1"]
+name_list = ["AfricanBuffalo","Post-LGM\nEuropean aurochs","Anatolia_Neolithic","Sahiwal","Shuangta_EN","Pre-LGM\nEuropean aurochs","Pre-LGM\nNorth Asian aurochs","Gyu1","Baikal1"]
+node_col_list = ["black","black","black","black","black","black","black","black","black","black","black"]
+edge_lst = []
+
+sc_list = ['C-2']
+
+for i in range(0,len(sc_list)):
+    sc = sc_list[i]
+    f = open("top" + sc + "_qpG.score.txt" , 'r')
+    header = f.readline() 
+    score, wz = f.readline().split()
+    f.close()
+    
+    fn1 = "top" + sc + "_qpG.edge.txt" 
+    df = pd.read_csv(fn1, sep="\t")
+    node_list = list(set(df['from'].to_list() + df['to'].to_list()))
+    outfile = open(fn1.replace('txt','dot'),'w')
+    
+    print("digraph G {", file=outfile, end="\n")
+    print('size = \"14,10\" ;', file=outfile, end="\n")
+    print('ratio = \"0.7\" ;', file=outfile, end="\n")
+    print('labelloc = \"t\" ;', file=outfile, end="\n")
+    print('label = \"score = '+ score +'\nworst z = '+ wz +'\" ;', file=outfile, end="\n\n")
+    for node in node_list:
+        if node not in pop_list:
+            print(node, ' [label = \"\" shape=\"point\" size=1 color=\"white\"];',file=outfile,end="\n")
+        elif node in pop_list:
+            name = name_list[pop_list.index(node)]
+            color = node_col_list[pop_list.index(node)]
+            print(node, ' [label = \"'+name+'\"  color=\"'+ color +'\"];',file=outfile,end="\n")
+    
+    print("\n",file=outfile)
+    
+    for i in range(len(df)):
+        f, t = df.loc[i,['from','to']]
+        if df.loc[i,'type'] == 'edge':
+            if (f,t) not in edge_lst:
+                label = int(round(df.loc[i,'weight']*1000))
+                print(f,"->",t, "[ label = ",'\"',label, '\"];',sep="",file=outfile,end="\n")
+            else : 
+                label = int(round(df.loc[i,'weight']*1000))
+                color = edge_col_list[edge_lst.index((f,t))]
+                print(f,"->",t, "[ label = ",'\"',label, '\" , color=\"'+ color +'\"];',sep="",file=outfile,end="\n")
+        else:
+            if (f,t) not in edge_lst:
+                label = int(round(df.loc[i,'weight']*100))
+                print(f,"->",t, "[ style=dotted, label = ",'\"',label, '%\"];',sep="",file=outfile, end="\n")
+            else : 
+                label = int(round(df.loc[i,'weight']*100))
+                color = edge_col_list[edge_lst.index((f,t))]
+                print(f,"->",t, "[ style=dotted, label = ",'\"',label, '%\", color=\"'+ color +'\"];',sep="",file=outfile,end="\n")
+    
+    print("}",file=outfile)
+    outfile.close()
+
+quit()

@@ -1,0 +1,311 @@
+#######################################################################
+#### 1. DATES (YR_LNBA = Balkans_Neolithic + East Asian aurochs ) ####
+#######################################################################
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/
+mkdir -p DATES_240828; cd DATES_240828
+
+pt1=($(pwd)"/")
+fn1="/data2/projects1/AnimalsChina/analysis/Bos/genotypes/240502/Bos.5688K.auto.combined.240503"
+fn2=${pt1}"Bos.5688K.auto.rename"
+info1="/data2/projects1/AnimalsChina/sample_info/Bos/JLU_cattle_pop_summary.txt"
+info2="/data2/projects1/AnimalsHapSharing/genotype/breedinfo.txt"
+of1=${pt1}"JLU_cattle_dates_240828"
+adm1=${pt1}"AncientChina_LNBA_list_240829.txt"
+
+parf=${of1}".par"
+
+# combine East Asian Aurochs & European taurine 
+pops="Honghe_LNBA Houtaomuga_LN Shuangta_EN Yangguanzhai_LN"
+echo ${pops}|sed s/" "/"\n"/g|awk '{OFS="\t"}{print $1,"EAA"}' > temp1 
+pops=""; while read pid; do pops+=" "${pid} ;done < <(cat ${info2}|awk '{ if ($2~/Europe/) print $1}' )
+echo ${pops}|sed s/" "/"\n"/g|awk '{OFS="\t"}{print $1,"EUT"}' >> temp1 
+
+while read iid sex pid; do 
+    npid=($(awk -v pid=$pid 'BEGIN{grp=pid}{if ($1==pid) grp=$2}END{print grp}' temp1))
+    echo -e ${iid}"\t"${sex}"\t"${npid} >> ${fn2}.ind
+done < ${fn1}.ind
+
+# targets = YR_LNBA
+targets="Shimao_LN1"
+while read pid; do 
+    targets+=" "${pid}
+done < <(cat ${info1}|awk '{ if ($2=="YR_LNBA") print $1}' )
+
+ref1s="EAA"
+ref2s="Balkans_Neolithic EUT"
+
+## Write an admixture combination list
+if [ -f "$adm1" ]; then rm ${adm1}; fi 
+for tar in ${targets}; do 
+    for r1 in ${ref1s}; do for r2 in ${ref2s}; do
+        echo -e ${r1}"\t"${r2}"\t"${tar}"\ttest_"${tar}"."${r1}"_"${r2} >> ${adm1}
+    done; done
+done
+
+## Write a template for DATES parameter files
+echo 'genotypename: '${fn1}'.geno' > ${parf}
+echo 'snpname: '${fn1}'.snp' >> ${parf}
+echo 'indivname: '${fn2}'.ind' >> ${parf}
+echo 'jackknife: YES' >> ${parf}
+echo 'binsize: 0.001' >> ${parf}
+echo 'maxdis: 1.0' >> ${parf}
+echo 'seed: 77' >> ${parf}
+echo 'runmode: 1' >> ${parf}
+echo 'chithresh: 0.0' >> ${parf}
+echo 'mincount: 1' >> ${parf}
+echo 'zdipcorrmode: YES' >> ${parf}
+echo 'qbin: 10' >> ${parf}
+echo 'runfit: YES' >> ${parf}
+echo 'afffit: YES' >> ${parf}
+echo 'lovalfit: 0.45' >> ${parf}
+echo 'checkmap: NO' >> ${parf}
+
+## Write admixlist file at the bottom of the parameter file
+echo 'admixlist: '${adm1} >> ${parf}
+
+## Run DATES
+sbatch -c 12 --mem 22000 --wrap="dates -p ${parf} > ${of1}.log"
+
+## Remove temp and slurm file
+rm temp* slurm-*.out
+
+## Merge final output information into one file
+pt1=($(pwd)"/")
+adm1=${pt1}"AncientChina_LNBA_list_240829.txt"
+scf1="/home/donghee_kim/script/Plotting_DATES.R"
+of1=${pt1}"JLU_cattle_dates_LNBA_EUT_240829"
+
+echo -e "Ref1\tRef2\tTarget\tMean\tStd.error\tZ" > ${of1}_summary.txt
+while read -r r1 r2 tar test; do
+    awk -v r1=${r1} -v r2=${r2} -v tar=${tar} '{OFS="\t"} {print r1,r2,tar,$2,$5,$7}' ${pt1}${test}/${tar}".jout" >> ${of1}_summary.txt  
+done < ${adm1}
+
+## Draw plot 
+p1s=""
+s1="EastAsianAurochs"
+s2="EurasianTaurine"
+while read target fn1; do
+    ${scf1} ${pt1}${fn1}/${target} ${target} ${s1} ${s2}
+    p1=${pt1}${fn1}"/"${target}".dates.pdf"
+    if [ "$p1s" == "" ]; then p1s=${p1}; else p1s+=" "${p1}; fi 
+done < <(awk '{if ($1=="EAA" && $2=="EUT") print $3,$4}' ${adm1}|sort -k3,3|grep -wv -e Changning_BA -e Dongying_LN)
+
+# combine 
+pdfunite ${p1s} ${of1}.pdf
+
+/home/donghee_kim/apps/pdfjam-3.12/bin/pdfjam ${of1}.pdf --no-landscape --frame true --nup 3x4 --suffix 4up --outfile ${of1}_matrix.pdf
+
+#########################################################
+#### save the following script as "Plotting_DATES.R" ####
+
+#!/home/donghee_kim/.conda/envs/Admixtools/bin/Rscript
+
+library(stringr)
+args = commandArgs(trailingOnly=TRUE)
+
+## read input file
+fn1 <- args[1]
+target <- args[2]
+sc1 <- args[3]
+sc2 <- args[4]
+of1 <- paste0(fn1,'.dates')
+
+## DATES
+df <- read.table(paste0(fn1,".fit"), col.name=c('d' , 'wLD', 'fit' , 'wLD-fit' ))
+dates <- read.table(paste0(fn1,".jout"), header=F)
+params <- read.delim(paste0(fn1,"_expfit.log"), header=F)
+
+df <- df[-nrow(df),] # remove last line
+yv <- df$wLD
+xv <- df$d
+
+m = dates$V2[1]
+se = dates$V5[1]
+A = as.numeric(strsplit(str_squish(params$V1[11]), " ")[[1]][1])
+B = as.numeric(strsplit(str_squish(params$V1[11]), " ")[[1]][2])
+prdv =  A* exp(-.01 * m * xv) + B
+
+## R nls (double exponential)
+#yv2 <- df[df$d < 20,]$wLD
+#xv2 <- df[df$d < 20,]$d
+#m1 = nls(yv ~ C1*exp(-0.01 * k1 * xv) + B, start = list(C1=1e-4,k1=2), control=list(maxiter=150))
+#amp_nls <- summary(m1)$coefficient[1]
+#date_nls <- summary(m1)$coefficient[2]
+#pm1 <- amp_nls*exp(-0.01 * date_nls * xv) + B
+
+pdf(paste0(of1,".pdf"),width=5,height=6)
+plot(xv, yv, xlim=c(0,50), xlab = "Genetic distance (cM)", ylab = "Weighted Ancestry Covariance", pch=16, col='black',main="")
+lines(xv, prdv, col="red", lwd=3)
+#lines(xv, pm1, col="blue", lwd=3)
+#legend("topright",legend=paste0("Inferred date (DATES): ",m," ± ",se," gens\nInferred date (nls): ",round(date_nls,3), " ± ",se," gens"),border="white",cex=1)
+legend("topright",legend=paste0("Inferred date: ",round(m,2)," ± ",round(se,2)," gens"),border="white",cex=1)
+title(paste0(target," =\n ",sc1," + ",sc2))
+dev.off()
+
+
+###################################################################################################
+#### 2. Alder ( Chinese cattle = Eurasian iaurine + South Asian indicine / Chinese indicine ) ####
+###################################################################################################
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/
+mkdir -p Alder_240829; cd Alder_240829
+mkdir -p parfile; mkdir -p log
+
+pt1=($(pwd)"/")
+fn1="/data2/projects1/AnimalsChina/analysis/Bos/genotypes/240502/Bos.5688K.auto.combined.240503"
+fn2=${pt1}"Bos.5688K.auto.rename"
+info="/data2/projects1/AnimalsHapSharing/genotype/breedinfo.txt"
+of1=${pt1}"parfile/Bos_alder_240829"
+lst1=${pt1}"Bos_EastAsia_list_240829.txt"
+scf1=${pt1}"ALDER_240829.sh"
+
+# Make a recipient list (China)
+if [ -f "$lst1" ]; then rm $lst1; fi
+while read pid; do 
+    nr=($(awk -v pid=$pid '$3==pid' ${fn1}.ind | wc -l ))
+    if [ "$nr" -gt 2 ]; then echo ${pid} >> ${lst1}; fi 
+done < <(awk '{ if ($2=="NorthWestChina"||$2=="NorthCentralChina"||$1=="Yakutian") print $1}' ${info})
+
+# Make a grouplist
+awk '{ if ($2 =="IndiaPakistan" || $2 ~/America/) print $1,"SAI"}' ${info} > temp1 
+awk '{ if ($2 =="SouthChina") print $1,"CHI"}' ${info} >> temp1 
+awk '{ if ($2 ~/Europe/ || $2~/NorthEastAsia/ && $1!="Yakutian") print $1,"EUT"}' ${info} >> temp1 
+
+## Make a ind list for alder - labeling for SAI
+while read -r iid sex pid; do
+    pid2=($(awk -v pid="$pid" 'BEGIN {pid2=pid} {if ($1 == pid) pid2=$2} END {print pid2}' temp1))
+    echo -e ${iid}"\t"${sex}"\t"${pid2} >> ${fn2}.ind
+done < ${fn1}.ind
+
+## Create a parameter file to run ALDER 
+refpop1s="EUT"
+refpop2s="CHI SAI"
+
+while read adpop ; do
+    for refpop1 in ${refpop1s}; do for refpop2 in ${refpop2s}; do 
+        echo "genotypename: "${fn1}".geno" > ${pt1}parfile/${adpop}_${refpop1}_${refpop2}.par
+        echo "snpname: "${fn1}".snp" >> ${pt1}parfile/${adpop}_${refpop1}_${refpop2}.par
+        echo "indivname: "${fn2}".ind" >> ${pt1}parfile/${adpop}_${refpop1}_${refpop2}.par
+        echo "admixpop: "${adpop} >> ${pt1}parfile/${adpop}_${refpop1}_${refpop2}.par
+        echo "refpops: "${refpop1}";"${refpop2} >> ${pt1}parfile/${adpop}_${refpop1}_${refpop2}.par
+        echo "checkmap: NO" >> ${pt1}parfile/${adpop}_${refpop1}_${refpop2}.par
+        echo "num_threads: 4" >> ${pt1}parfile/${adpop}_${refpop1}_${refpop2}.par
+        echo "mindis: 0.005" >> ${pt1}parfile/${adpop}_${refpop1}_${refpop2}.par
+        echo "mincount: 2" >> ${pt1}parfile/${adpop}_${refpop1}_${refpop2}.par
+        echo "raw_outname: ${pt1}log/${adpop}_${refpop1}_${refpop2}.raw.txt" >> ${pt1}parfile/${adpop}_${refpop1}_${refpop2}.par
+    done ; done 
+done < ${lst1}
+
+## run ALDER
+idnmax=($(wc -l ${lst1}))
+nperrun=4
+
+for refpop1 in ${refpop1s}; do for refpop2 in ${refpop2s}; do 
+    sbatch --array=1-${idnmax}%${nperrun}  -c 4 --mem 7500 --wrap=${scf1}" "${refpop1}" "${refpop2}" "${lst1}
+done ; done 
+
+## reformat result file
+pt1=($(pwd)"/")
+of1="Bos_alder_240829.result.txt"
+lst1=${pt1}"Bos_EastAsia_list_240829.txt"
+scf1="/home/donghee_kim/script/Plotting_ALDER.R"
+
+refpop1s="EUT"
+refpop2s="CHI SAI"
+
+echo -e "Target\tTest_status\tRefA\tRefB\tp-value\taffine\tdate\tdate_se\tamp_exp\tamp_exp_se" > ${of1}                 
+while read target; do 
+    for refpop1 in ${refpop1s}; do for refpop2 in ${refpop2s}; do 
+        aff=($(grep "amp_aff:" log/${target}_${refpop1}_${refpop2}.log|awk '{print $3}'|head -n 1))
+        tail -n 3 log/${target}_${refpop1}_${refpop2}.log |head -n 1|awk -F "\t" -v aff=$aff 'OFS="\t" {print $4,$2,$5,$6,$3,aff,$11,$12}' |sed 's/ +\/- /\t/g' |sed s/"(warning: decay rates inconsistent)"/""/g >> ${of1}
+    done ; done 
+done < ${lst1}
+
+## plotting 
+p1s=""
+s1="EurasianTaurine"
+s2="ChineseIndicine"
+refpop1s="EUT"
+refpop2s="CHI"
+while read target; do 
+    for refpop1 in ${refpop1s}; do for refpop2 in ${refpop2s}; do 
+        fn1=${pt1}"log/"${target}"_"${refpop1}"_"${refpop2}
+        ${scf1} ${of1} ${fn1} ${target} ${s1} ${s2}
+        p1=${pt1}"log/"${target}"_"${refpop1}"_"${refpop2}".dates.pdf"
+        if [ "$p1s" == "" ]; then p1s=${p1}; else p1s+=" "${p1}; fi 
+    done ; done 
+done < ${lst1}
+
+# combine 
+pdfunite ${p1s} Bos_alder_240829.pdf
+
+########################################################
+#### save the following script as "ALDER_240829.sh" ####
+
+#!/bin/bash
+
+J=$SLURM_ARRAY_TASK_ID
+
+refpop1=$1
+refpop2=$2
+listf=$3
+
+adpop=($(awk -v J=$J '{ if (NR==J) print $1}' ${listf}))
+
+~/apps/alder/alder -p ./parfile/${adpop}_${refpop1}_${refpop2}.par > ./log/${adpop}_${refpop1}_${refpop2}.log
+
+#########################################################
+#### save the following script as "Plotting_ALDER.R" ####
+
+#!/home/donghee_kim/.conda/envs/Admixtools/bin/Rscript
+
+args = commandArgs(trailingOnly=TRUE)
+
+## read input file
+fn1 <- args[1] # summary 
+fn2 <- args[2] # raw 
+target <- args[3]
+sc1 <- args[4]
+sc2 <- args[5]
+of1 <- paste0(fn2,'.dates') 
+
+# summary 
+dates <- read.table(fn1, header=T)
+dates <- subset(dates, Target==target)
+
+# raw cov 
+df <- read.table(paste0(fn2,".raw.txt"), col.name=c('d' , 'wLD', 'binCount' ))
+
+df <- df[-nrow(df),] # remove last line
+yv <- df$wLD
+xv <- df$d
+
+# ALDER 
+m = as.numeric(dates$date[1])
+se = as.numeric(dates$date_se[1])
+A = as.numeric(dates$amp_exp[1])
+B = as.numeric(dates$affine[1])
+prdv =  A* exp(-.01 * m * xv) + B
+
+# R nls (double exponential)
+#yv2 <- df[df$d < 10,]$wLD
+#xv2 <- df[df$d < 10,]$d 
+#m1 = nls(yv ~ C1*exp(-0.01 * k1 * xv) + C2*exp(-0.01 * k2 * xv) + B, start = list(C1=1e-4,C2=1e-4,k1=2,k2=30), lower=c(C1=0,C2=0,k1=0,k2=0), control=list(maxiter=150))
+#date_nls1 <- summary(m1)$coefficient[3]
+#date_nls2 <- summary(m1)$coefficient[4]
+#pm1 <- amp_nls*exp(-0.01 * date_nls * xv) + B
+
+
+pdf(paste0(of1,".pdf"),width=5,height=6)
+plot(xv, yv, xlim=c(0,50), xlab = "Genetic distance (cM)", ylab = "Weighted LD", pch=16, col='black',main="")
+lines(xv, prdv, col="red", lwd=3)
+#lines(xv, predict(m1), col="blue", lwd=3)
+#legend("topright",legend=paste0("Inferred date (Alder): ",m," ± ",se," gens\nInferred date1 & date2 (nls): ",round(date_nls1,2),", ",round(date_nls2,2)),border="white",cex=1)
+legend("topright",legend=paste0("Inferred date: ",m," ± ",se," gens"),border="white",cex=1)
+#legend("topright",legend=c("R_nls"),fill=c("red"),border="white",cex=1)
+title(paste0(target," =\n ",sc1," + ",sc2))
+dev.off()
+
+
+

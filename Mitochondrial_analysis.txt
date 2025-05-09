@@ -1,0 +1,617 @@
+#########################################################
+###### 1. Extract MT sequences and consensus call #######
+#########################################################
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/
+mkdir -p MT_250410; cd MT_250410
+mkdir -p BAM 
+
+pt1=($(pwd)"/")
+lst1="/data2/PubData/Rossi2024Nature/analysis/genotypes/Rossi2024.5688K.cov.txt"
+lst2="/data2/projects1/AnimalsChina/sample_info/Bos/JLU_cattle_unique_lib_summary_240503.txt"
+listf1=${pt1}"Rossi2024nature_list.txt"
+listf2=${pt1}"AnimalsChina_list.txt"
+scf1=${pt1}"MT_consensus_call.sh"
+
+## make list 
+# Rossi 2024 nature 
+dt1="/data2/PubData/Rossi2024Nature/DataProcessing/"
+sp="Cattle"
+if [[ -f "$listf1" ]]; then rm ${listf1}; fi 
+while read rid; do 
+    iid=($(echo ${rid}|cut -d"." -f1))
+    lid=($(echo ${rid}|cut -d"." -f1,2))
+    sid=${rid}"."${sp}
+    ibam=($(realpath ${dt1}${iid}/BAM/${sid}/${sid}.*.rmdup.q30.bam))
+    echo ${iid} ${lid} ${rid} ${sp} ${ibam} |sed s/" "/"\t"/g >> ${listf1}
+done < <(tail -n +2 ${lst1}|cut -f1)
+
+# this study 
+dt2="/data2/projects1/AnimalsChina/DataProcessing/Bos/"
+sp="Cattle"
+if [[ -f "$listf2" ]]; then rm ${listf2}; fi 
+while read rid; do 
+    iid=($(echo ${rid}|cut -d"." -f1))
+    lid=($(echo ${rid}|cut -d"." -f1,2))
+    sid=${rid}"."${sp}
+    ibam=($(realpath ${dt2}${iid}/BAM/${sid}.*.rmdup.q30.bam))
+    echo ${iid} ${lid} ${rid} ${sp} ${ibam} |sed s/" "/"\t"/g >> ${listf2}
+done < <(tail -n +2 ${lst2}|awk '$30 ~ /Bos/' |awk '$19 > 0.1' |cut -f4)
+
+
+## extract & consensus call 
+CMD1=${scf1}" "${listf1}
+
+idnmax=($(wc -l ${listf1}))
+nperrun=8
+
+sbatch --array=1-${idnmax}%${nperrun} -c 8 --mem 15000 -p amd --wrap="$CMD1"
+
+CMD2=${scf1}" "${listf2}
+
+idnmax=($(wc -l ${listf2}))
+nperrun=8
+
+sbatch --array=1-${idnmax}%${nperrun} -c 8 --mem 15000 -p amd --wrap="$CMD2"
+
+## summary file 
+of1=${pt1}"MT_summary.txt"
+
+echo "IID LID RID numreads covbases coverage meandepth meanbaseq meanmapq" |sed s/" "/"\t"/g > ${of1}
+
+while read iid lid rid sp; do 
+    tfn1=${pt1}"BAM/"${rid}"/"${rid}"."${sp}".MT.coverage.txt"
+    tail -n +2 ${tfn1}| cut -f4- | awk -v iid=$iid -v lid=$lid -v rid=$rid '{OFS="\t"}{print iid,lid,rid,$0}' >> ${of1}
+done < <(cat ${listf1} ${listf2}| cut -f1-4)
+
+
+
+
+##############################################################
+#### write the following script as "MT_consensus_call.sh" ####
+
+#!/bin/bash
+
+listf=$1
+inum=$SLURM_ARRAY_TASK_ID
+
+iid=($(awk -v inum=$inum '{if (NR==inum) print $1}' ${listf}))
+rid=($(awk -v inum=$inum '{if (NR==inum) print $3}' ${listf}))
+sp=($(awk -v inum=$inum '{if (NR==inum) print $4}' ${listf}))
+ibam=($(awk -v inum=$inum '{if (NR==inum) print $5}' ${listf}))
+
+mkdir -p ./BAM/${rid}
+cd ./BAM/${rid}
+
+of1=${rid}"."${sp}".MT"
+
+## extract MT bam
+samtools view -b ${ibam} MT -o ${of1}.rmdup.q30.bam
+samtools index ${of1}.rmdup.q30.bam
+
+## calculate coverage
+samtools coverage ${of1}.rmdup.q30.bam -r MT -o ${of1}.coverage.txt
+
+## consensus call
+samtools consensus -r MT -a ${of1}.rmdup.q30.bam -d 3 -o temp1_${of1}.fasta
+bioawk -c fastx -v iid=$iid '{print ">"iid; print $seq}' temp1_${of1}.fasta > ${of1}.fasta
+
+rm temp1_${of1}.fasta
+
+
+###########################
+###### 2. MT reference ####
+###########################
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/MT_250410
+mkdir -p MT_reference  
+mkdir -p Tree
+
+pt1=($(pwd)"/")
+fn1="/data2/projects1/AnimalsChina/analysis/Bos/MT/DATA/Bos_MT.txt"
+ref="/home/References/Cattle/ARS-UCD1.2.MT.fa"
+listf=${pt1}"Rossi2024nature_list.txt"
+lst1=${pt1}"MT_summary.txt"
+of1=${pt1}"MT_reference/MT_reference"
+scf1="/home/donghee_kim/script/convert_mfasta_to_eigestrat.py"
+
+# combine and align 
+bioawk -c fastx '{print ">Reference"; print $seq}' ${ref} > ${of1}_unaligned.fa
+cat ${fn1}|sed s/"@"/""/g >> ${of1}_unaligned.fa
+cat ./MT_reference/*.fasta >> ${of1}_unaligned.fa
+while read rid; do 
+    tfn1=${pt1}"BAM/"${rid}"/"${rid}".Cattle.MT.fasta"
+    cat ${tfn1} >> ${of1}_unaligned.fa
+done < <(cut -f3 ${listf} |fgrep -wf - ${lst1} | awk '$6 > 90 && $7 > 10'|cut -f3)
+
+# align 
+mafft --op 3 --ep 1 --thread 20 ${of1}_unaligned.fa > ${of1}_aligned.fa
+
+# tree 
+CMD="iqtree -s ${of1}_aligned.fa -pre ${of1}_ML -m HKY -mem 20G -ntmax 12"
+sbatch -c 12 --mem 22000 --wrap="$CMD"
+
+java -jar /opt/ohpc/pub/apps/FigTree/v1.4.4/lib/figtree.jar 
+
+# extract seq and name from multifasta
+bioawk -c fastx '{print $seq}' ${of1}_aligned.fa > ${of1}_onlyseq.txt
+grep '>' ${of1}_aligned.fa > ${of1}_onlyname.txt
+
+# change mfasta to eigenstrat
+${scf1} -p ${of1} -o ${of1} 
+
+# make pos file & modify SNP file 
+cut -f2,4 ${of1}.biSNP.snp > ${of1}.biSNP.pos.list.txt
+cut -f2,4 ${of1}.monoSNP.snp > ${of1}.monoSNP.pos.list.txt
+
+sed s/"MT"/"32"/g ${of1}.biSNP.snp > temp1 
+mv temp1 ${of1}.biSNP.snp
+sed s/"MT"/"32"/g ${of1}.monoSNP.snp > temp2
+mv temp2 ${of1}.monoSNP.snp
+
+sed s/"."/"& "/g  ${of1}.biSNP.geno|sed s/" $"/""/ > ${of1}.biSNP.geno.txt
+
+# Calculate PMR 
+scf2="/home/donghee_kim/script/Calculate_PMR_matrix.R" 
+
+${scf2} -g ${of1}.biSNP.geno.txt -i ${of1}.biSNP.ind -o ${of1}.pmr.result.txt 
+
+
+####### plot #######
+
+R 
+
+rm=list()
+library(gplots)
+library(ggplot2)
+
+## PMR estimate
+d1 <- read.table("./MT_reference/MT_reference.pmr.result.txt",header=T)
+colnames(d1) <- c("iid1","pid1","iid2","pid2","nsnp","nmismatch","est")
+
+# total 
+p1s = unique(c(as.vector(d1$iid1), as.vector(d1$iid2))) ## unique samplelist
+
+## Create a similarity matrix (PMR)
+smat1 = matrix(nrow=length(p1s), ncol=length(p1s))
+for (p1 in p1s) {
+    inum = which(p1s == p1) ## where sample is in sample vector
+    tfv1 = as.vector(d1$iid1) == p1 | as.vector(d1$iid2) == p1 ## True or False where sample is in data
+    tv1 = 1 - as.vector(d1$est)[tfv1] ## 1- PMR
+    tv2 = rep(NA, length(p1s))
+    tv2[setdiff(1:length(p1s), inum)] = tv1 ## exclude itself
+    smat1[,inum] = tv2
+}
+
+## plotting
+pdf(file="./MT_reference/MT_reference.PMR.heatmap.pdf", height=10, width=10)
+heatmap.2(smat1,  labRow=p1s, labCol=p1s, trace='none', cexRow=0.15,cexCol=0.15, margins=c(6,6.0),symm=TRUE)
+dev.off()
+
+
+
+#################################################################################################
+#### write the following script as "/home/donghee_kim/script/convert_mfasta_to_eigestrat.py" ####
+
+#!/home/donghee_kim/.conda/envs/momi/bin/python
+
+import argparse
+import os
+import sys
+import numpy as np
+import random
+
+parser = argparse.ArgumentParser(description='find branch tagging snp')
+parser.add_argument('--prefix','-p', help="fasta sequence prefix")
+parser.add_argument('--out','-o', help="output file path")
+args = parser.parse_args()
+
+## argument
+fn1=args.prefix
+INPUTseq=fn1+'_onlyseq.txt'
+INPUTname=fn1+'_onlyname.txt'
+
+of1=args.out
+bi=of1+'.biSNP'
+mono=of1+'.monoSNP'
+
+## Read INPUT file
+
+file=open(INPUTseq,'r')
+mfasta=[]
+## iteration
+while True:
+    line= file.readline().strip()
+    if not line: break
+    mfasta.append(line)
+
+file.close()
+
+file=open(INPUTname,'r')
+idlist=[]
+## iteration
+while True:
+    line= file.readline().strip()
+    if not line: break
+    idlist.append(line)
+
+file.close()
+
+def Eigenstrat(mfasta):
+    ref=mfasta[0]
+    nfa=len(mfasta)
+
+    ## first, remove deletion site in reference sequence
+    nodel=[ i for i,letter in enumerate(ref) if letter != '-']
+    newfasta=['' for fa in mfasta]
+    for i in nodel:
+        for j in range(nfa):
+            newfasta[j]+=mfasta[j][i]
+
+    ## second, find biallelic SNPlist, monoallelic SNPlist
+    seqlen=len(newfasta[0])
+    poslist=[]
+    snplist=[]
+    monolist=[]
+    for base in range(seqlen):
+            baselist=[seq[base] for seq in newfasta]
+            baseset=set(baselist)
+            baseset = baseset - {'n'}
+            if (len(baseset) == 2) & ('-' not in baseset) & (ref[base] != 'n'):
+                poslist.append(base)
+                snplist.append(baseset)
+            elif (len(baseset) == 1) & ('-' not in baseset) & (ref[base] != 'n'):
+                monolist.append((newfasta[0][base],base))
+
+    ## third, make SNP, geno file, monoallelic SNP file
+    ## $1==chr:pos, $2=chr, $3=0.0, $4=pos, $5=ref, $6=alt
+    nref=newfasta[0]
+    snpf=[]
+    genof=[]
+    monof=[]
+
+    for k in range(len(poslist)):
+        pos=poslist[k]## python count from 0
+        refb=nref[poslist[k]] ## reference base
+        altb=[i for i in snplist[k] if i != refb][0] ## alternative base
+        sline=['MT:'+str(pos+1),'MT','0.0',str(pos+1),refb.upper(),altb.upper()]
+        snpf.append(sline)
+
+        gline=''
+        for seq in newfasta:
+            if seq[pos]==refb:
+                gline+=str(2)
+            elif seq[pos]==altb:
+                gline+=str(0)
+            else:
+                gline+=str(9)
+        genof.append(gline)
+
+    for k in range(len(monolist)):
+        dntp=['A','C','G','T']
+        pos=monolist[k][1]
+        refb=monolist[k][0]
+        altb=random.choice([b for b in dntp if b!=dntp])
+        mline=['MT:'+str(pos+1),'MT','0.0',str(pos+1),refb.upper(),altb.upper()]
+        monof.append(mline)
+
+    ## fourth, make multifasta with biallelic SNP
+    biSNPfa=[]
+    for seq in newfasta:
+        newfa=''
+        for pos in poslist:
+            newfa+=seq[pos]
+        biSNPfa.append(newfa)
+
+    return snpf, genof, biSNPfa, monof
+
+## output
+snpf,genof,biSNPfa, monof = Eigenstrat(mfasta)
+
+s = open(bi+'.snp', 'w')
+for k in range(len(snpf)):
+    print(*snpf[k],sep='\t',file=s)
+s.close()
+
+g = open(bi+'.geno', 'w')
+for k in range(len(genof)):
+    print(genof[k],file=g)
+g.close()
+
+i = open(bi+'.ind', 'w')
+for k in range(len(idlist)):
+    print(idlist[k].strip("@"">"),"U",idlist[k].strip("@"">"),sep="\t",file=i)
+i.close()
+
+fa = open(bi+'.fasta', 'w')
+for k in range(len(biSNPfa)):
+    print(idlist[k].strip("@"),file=fa)
+    print(biSNPfa[k],file=fa)
+fa.close()
+
+m = open(mono+'.snp', 'w')
+for k in range(len(monof)):
+    print(*monof[k],sep='\t',file=m)
+m.close()
+
+
+################################
+###### 3. MT haplogrouping  ####
+################################
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/MT_250410/
+mkdir -p haplogroup
+
+pt1=($(pwd)"/")
+fn1=${pt1}"MT_reference/MT_reference.biSNP"
+fn2=${pt1}"MT_reference/MT_reference.monoSNP"
+info=${pt1}"MT_reference/MT_reference_info.txt"
+listf=${pt1}"AnimalsChina_list.txt"
+ref="/home/References/Cattle/ARS-UCD1.2.chrY.fa"
+scf1=${pt1}"MT_haplogroup.sh"
+
+CMD=${scf1}" "${listf}" "${ref}" "${fn1}" "${fn2}" "${info}
+
+idnmax=($(wc -l ${listf}))
+nperrun=8
+
+sbatch --array=1-${idnmax}%${nperrun} -c 8 --mem 15000 -p amd --wrap="$CMD" 
+
+
+#####################################################################################
+########### write the following script as "MT_haplogroup.sh" #############
+
+#!/bin/bash
+
+pt1=($(pwd)"/")
+
+listf=$1  ## A list of samples to be processed (LID)
+ref=$2   ## the reference genome
+fn1=$3  ## MT SNP pos prefix
+fn2=$4 ## MT monomorphic sites
+info=$5 ## MT reference haplogroup info
+
+inum=$SLURM_ARRAY_TASK_ID
+
+## Define the input BAM file
+## no-masked file for ssLib; otherwise, end-masked BAM file
+iid=($(awk -v inum=$inum '{if (NR==inum) print $1}' ${listf}))
+rid=($(awk -v inum=$inum '{if (NR==inum) print $3}' ${listf}))
+sp=($(awk -v inum=$inum '{if (NR==inum) print $4}' ${listf}))
+ibam=${pt1}"BAM/"${rid}"/"${rid}"."${sp}".MT.rmdup.q30.bam"
+
+echo ${rid}", "${ibam}" is being genotyped"
+
+## make directory
+cd haplogroup
+mkdir -p ${rid} ; cd ${rid}
+
+## Repeat the process for each SNP set of the target species
+posf1=${fn1}".pos.list.txt"   ## .pos file
+snpf1=${fn1}".snp"   ## .snp file
+posf2=${fn2}".pos.list.txt"   ## .pos file
+of1=${rid}".MT"
+of2=${rid}".MT.mono"
+
+## Run samtools mpileup & genotyping 
+samtools mpileup -B -R -q30 -Q30 -l ${posf1} -f ${ref} ${ibam} > ./${of1}.temp.pileup # MT SNP
+samtools mpileup -B -R -q30 -Q30 -l ${posf2} -f ${ref} ${ibam} > ./${of2}.pileup # MT monomorphic
+
+## Fix chromosome name by species
+cut -f 1 ./${of1}.temp.pileup | sed s/'MT'/'32'/g | paste - ./${of1}.temp.pileup | cut -f 1,3- | sort -k1,1n -k2,2n > ./${of1}.pileup
+
+## Run pileupCaller
+pileupCaller --majorityCall -d 1 --sampleNames ${rid} -f ${snpf1} -e ./${of1} < ./${of1}.pileup
+
+## Calculate PMR with reference panel & find the closest one 
+/home/donghee_kim/script/Calculate_PMR_reference.R --geno ${of1}.geno --ind ${of1}.ind --ref ${fn1}.geno.txt --refind ${fn1}.ind --outfile temp_1 --pseudohaploid T
+
+echo -e "IID1\tIID2\thaplogroup\tnsnp\tnmismatch\tpmismatch" > ${of1}.pmr.txt
+
+while read iid2 nsnp nmis pmr; do 
+    hap=($(awk -v iid2=$iid2 '{if ($1==iid2) print $2}' ${info}))
+    echo ${rid} ${iid2} ${hap} ${nsnp} ${nmis} ${pmr} |sed s/" "/"\t"/g >> ${of1}.pmr.txt
+done < <(tail -n +2 temp_1|grep -wv "Reference"|cut -f3,5,6,7)
+
+while read hap; do 
+    awk -v hap=$hap '$3==hap' ${of1}.pmr.txt |sort -k6,6n | head -n 1 >> temp_2
+done < <(tail -n +2 ${of1}.pmr.txt| cut -f3 |sort|uniq)
+
+head -n 1 ${of1}.pmr.txt > ${of1}.best_haplo.txt
+sort -k6,6n temp_2 >> ${of1}.best_haplo.txt
+
+rm temp_*
+
+########################################################################
+#### save the following script as "Calculate_PMR_reference.R" ####
+
+#!/home/donghee_kim/.conda/envs/Admixtools/bin/Rscript
+
+library(argparser, quietly=TRUE)
+
+# Create a parser
+p <- arg_parser("Calculate PMR using matrix multiplicaiton")
+
+# Add command line arguments
+p <- add_argument(p, "--geno", help="genotype file name")
+p <- add_argument(p, "--ind", help="sample ind file")
+p <- add_argument(p, "--ref", help="reference panel, genotype should be delimited with space")
+p <- add_argument(p, "--refind", help="ind file name, individual should match genotype")
+p <- add_argument(p, "--outfile", help="output file name")
+p <- add_argument(p, "--pseudohaploid", help="pseudohaploid (TRUE) or diploid (FALSE)", default=F)
+
+# Parse the command line arguments
+argv <- parse_args(p)
+
+# Input files
+gfile=argv$geno
+ifile=argv$ind
+refgfile=argv$ref
+refifile=argv$refind
+of1=argv$outfile
+pseudohaploid=argv$pseudohaploid
+
+# Import library
+library(data.table)
+library(tictoc)
+
+## Measure time for matrix multiplication
+tic("Total PMR calculation")
+tic("Reading genotypes")
+
+sgeno <- as.matrix(fread(gfile,header=F,data.table=FALSE))
+refgeno <- as.matrix(fread(refgfile,header=F,data.table=FALSE))
+sind <- fread(ifile,header=F)
+refind <- fread(refifile,header=F)
+
+colnames(sind) <- c("iid","sex","pid")
+colnames(refind) <- c("iid","sex","pid")
+
+toc() # end of reading genotypes
+
+# memory size of matrix
+print(paste0("The size of reference genotype matrix : ",as.integer(object.size(refgeno)/1e6)," Mb") )
+
+# convert genotype matrix
+tic("Matrix multiplication")
+if (pseudohaploid) {
+    # first, calculate nmismatch (shifted later)
+    sgeno <- sgeno - 1
+    sgeno[sgeno %% 8 == 0] <- 0 # 9-1 as missing
+
+    refgeno <- refgeno - 1
+    refgeno[refgeno %% 8 == 0] <- 0 # 9-1 as missing
+
+    count_matrix <- t(sgeno) %*% refgeno
+
+    # second, calculate nsnps by each individual pairs
+    sgeno[sgeno == -1] <- 1
+    refgeno[refgeno == -1] <- 1
+
+    nsnp_matrix <- t(sgeno) %*% refgeno
+
+    # Third, combine it to calculate pmr
+    pmr_matrix <- (-(1/2)*(count_matrix) + (1/2)*(nsnp_matrix))/(nsnp_matrix)
+    nmis_matrix <- -(1/2)*(count_matrix) + (1/2)*(nsnp_matrix)
+
+} else  {
+    # first, calculate nmismatch (shifted later)
+    sgeno_c <- sgeno - 1
+    sgeno_c[sgeno_c %% 8 == 0] <- 0 # 9-1 as missing
+
+    refgeno_c <- refgeno - 1
+    refgeno_c[refgeno_c %% 8 == 0] <- 0 # 9-1 as missing
+
+    count_matrix <- t(sgeno_c) %*% refgeno_c
+
+    # second, calculate nsnps by each individual pairs
+    sgeno[sgeno == 0|sgeno == 2] <- 1
+    sgeno[sgeno == 9] <- 0
+
+    refgeno[refgeno == 0|refgeno == 2] <- 1
+    refgeno[refgeno == 9] <- 0
+
+    nsnp_matrix <- t(sgeno) %*% refgeno
+
+    # Third, combine it to calculate pmr
+    pmr_matrix <- (-(1/2)*(count_matrix) + (1/2)*(nsnp_matrix))/(nsnp_matrix)
+    nmis_matrix <- -(1/2)*(count_matrix) + (1/2)*(nsnp_matrix)
+}
+
+toc() # end of matrix multiplication
+
+# maximum memory used
+print(paste0("Maximum memory used : ",as.integer(gc()[2,6])," Mb") )
+
+# convert to data table
+tic("Coverting into data table")
+iid1_vec <- c(); iid2_vec <- c(); pid1_vec <- c(); pid2_vec <- c()
+nsnp_vec <- c(); nmis_vec <- c(); pmis_vec <- c()
+
+i <- 1
+iid1 <- as.character(sind$iid[i]) ; pid1 <- as.character(sind$pid[i])
+for (j in 1:nrow(refind))  {
+    # unique indivs pairs
+    iid2 <- as.character(refind$iid[j]) ; pid2 <- as.character(refind$pid[j])
+
+    # add to vector
+    iid1_vec <- c(iid1_vec,iid1); iid2_vec <- c(iid2_vec,iid2); pid1_vec <- c(pid1_vec,pid1); pid2_vec <- c(pid2_vec,pid2)
+    nsnp_vec <- c(nsnp_vec,nsnp_matrix[i,j]); nmis_vec <- c(nmis_vec,nmis_matrix[i,j]); pmis_vec <- c(pmis_vec,pmr_matrix[i,j])
+}
+
+toc() # end of converting
+
+# write output file
+tic("Writing")
+
+df <- data.frame(cbind(iid1_vec,pid1_vec,iid2_vec,pid2_vec,nsnp_vec,nmis_vec,pmis_vec))
+colnames(df) <- c("IID1","PID1","IID2","PID2","nsnp","nmismatch","pmismatch")
+
+df[df$pmismatch==NaN,6] <- NA
+df[df$pmismatch==NaN,7] <- NA
+
+write.table(df, file=of1, quote=F, sep="\t", row.names=F)
+
+toc() # end of writing
+
+toc() # end of commands
+
+
+#######################################
+#### 4. MT tree (reference subset) ####
+#######################################
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/MT_250410
+mkdir -p MT; mkdir -p Tree
+
+pt1=($(pwd)"/")
+fn1=${pt1}"MT_reference/MT_reference_aligned.fa"
+info=${pt1}"MT_reference/MT_reference_info.txt"
+listf=${pt1}"AnimalsChina_list.txt"
+lst1=${pt1}"MT_summary.txt"
+of1=${pt1}"MT/Ancient_MT_subset"
+of2=${pt1}"Tree/Ancient_MT_subset_ML"
+
+## subset 
+if [[ -f ids.txt ]]; then rm ids.txt; fi 
+while read hap; do 
+    awk -v hap=$hap '{if ($2==hap) print $1}' ${info}|head -n 2 >> ids.txt 
+done < <(tail -n +2 ${info}|cut -f2|sort|uniq)
+
+bioawk -c fastx 'BEGIN{ while((getline k < "ids.txt") > 0) ids[k]=1 } ids[$name] { print ">"$name"\n"$seq }' ${fn1} > ${of1}_unaligned.fa
+
+# combine & align 
+while read iid; do
+    rid=($(awk -v iid=$iid '{if ($1==iid) print $3,$7}' ${lst1}|sort -k7,7nr|head -n1|awk '{print $1}'))
+    tfn1=${pt1}"BAM/"${rid}"/"${rid}".Cattle.MT.fasta"
+    cat ${tfn1} >> ${of1}_unaligned.fa
+done < <(cut -f3 ${listf} |fgrep -wf - ${lst1} | awk '$6 > 90 && $7 > 10'|cut -f1|sort|uniq|grep -v "-" )
+
+# align 
+mafft --op 3 --ep 1 --thread 20 ${of1}_unaligned.fa > ${of1}_aligned.fa
+
+# tree 
+CMD="iqtree -s ${of1}_aligned.fa -pre ${of2} -m HKY -mem 20G -ntmax 12"
+sbatch -c 12 --mem 22000 --wrap="$CMD"
+
+java -jar /opt/ohpc/pub/apps/FigTree/v1.4.4/lib/figtree.jar 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

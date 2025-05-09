@@ -1,0 +1,388 @@
+#########################
+## 1. Reference set   ##
+#########################
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/Classification_240526
+
+pt1=($(pwd)"/")
+fn1="/data1/PubData/CattleMerged_210420/genotype/WholeGenome/Bos.PL_0.9.auto.tv.f1"
+dt1="/data2/projects1/AnimalsChina/DataProcessing/Bos/"
+snpfl=${dt1}"snpf_list_cattle_50M.txt"
+lst1=${pt1}"Species_genotypes_panel.txt"
+scf1="/data2/projects1/AnimalsChina/analysis/Bos/genotypes/240214/eigenstrat_sample_merge_rename_181223.py"
+
+# Calculate Stats (Het and missingness)
+fn2="/data1/PubData/CattleMerged_210420/genotype/974K/Bos.974K.auto.combined"
+
+genoStats -g ${fn2}.geno -s ${fn2}.snp -i ${fn2}.ind > Bos.974K.auto.stats.txt
+
+# Make panel list 
+# Bos taurus, Bos indicus, Bos grunniens, Bos gaurus, Water Buffalo, Goat 
+echo "HAN08 JIA01 SAH02 GAU01 WAB01 GOA01 BY02C.A0101.SG1.1 HH13C DOY"| sed s/" "/"\n"/g > temp1 
+echo "AST CHI SAI GAU WAB GOA aAST ASA DOY"| sed s/" "/"\n"/g > temp2
+paste temp1 temp2 > ${lst1}
+rm temp*
+
+## extract panel genofile
+mkdir -p panel
+while read sp prx sfx; do 
+    while read iid pid; do 
+        cn1=($(awk -v iid=$iid '{ if ($1==iid) print NR}' ${prx}.ind))
+        if [ "$cn1" != "" ]; then 
+            cut -b${cn1} ${prx}.geno > ./panel/${iid}.${sfx}.geno 
+            echo -e ${iid}"\tU\t"${pid} > ./panel/${iid}.${sfx}.ind 
+        fi
+    done < ${lst1}
+done < ${snpfl}
+
+## add BY02C,HH13C,all domestic yak and merge 
+iids="BY02C HH03C HH03C HH13C"
+rids="BY02C.A0101.SG1.1 HH03C.A0101.SG1.1 HH03C.A0102.SG1 HH13C.A0101.SG1.1"
+genofs="" ; indfs=""
+for i in $(seq 1 4); do    
+    iid=($(echo ${iids}|cut -d " " -f${i}))
+    rid=($(echo ${rids}|cut -d " " -f${i}))
+    genof=($(realpath ${dt1}${iid}/genotypes/${rid}.Cattle.bos.50M.geno))
+    indf=($(realpath ${dt1}${iid}/genotypes/${rid}.Cattle.bos.50M.ind))
+    if [ "$genofs" == "" ]; then genofs=${genof}; else genofs+=" "${genof}; fi 
+    if [ "$indfs" == "" ]; then indfs=${indf}; else indfs+=" "${indf}; fi 
+done 
+
+doy="DOY"
+while read sp prx sfx; do 
+    cn1s=""
+    genof="./panel/temp1.geno"
+    indf="./panel/temp1.ind"
+    while read iid sex pid; do 
+        cn1=($(awk -v iid=$iid '{ if ($1==iid) print NR}' ${prx}.ind))
+        if [ "$cn1s" == "" ]; then cn1s=${cn1}; else cn1s+=","${cn1}; fi 
+    done < <(grep ${doy} ${prx}.ind)
+    cut -b${cn1s} ${prx}.geno > ${genof}
+    grep ${doy} ${prx}.ind > ${indf}
+    genofs+=" "${genof} ; indfs+=" "${indf}
+done < ${snpfl}
+
+paste -d "" ${genofs} > ./panel/temp2.geno 
+cat ${indfs} > ./panel/temp2.ind
+
+# merge 
+# make merging list 
+# $1=merge id, $2=merging libraries 
+echo -e "Merge_ID\tRIDs" > templist
+echo -e "HH13C\tHH03C.A0101.SG1.1,HH03C.A0102.SG1,HH13C.A0101.SG1.1" >> templist
+echo -e "DOY\tDOY01,DOY02,DOY03,DOY04,DOY05,DOY06" >> templist
+
+${scf1} ./panel/temp2 ./panel/temp3 templist
+
+while read iid pid; do 
+    cn1=($(awk -v iid=$iid '{ if ($1==iid) print NR}' ./panel/temp3.ind))
+    cut -b${cn1} ./panel/temp3.geno > ./panel/${iid}.bos.50M.geno 
+    echo -e ${iid}"\tU\t"${pid} > ./panel/${iid}.bos.50M.ind 
+done < <(cut -f1 ./panel/temp3.ind|fgrep -wf - ${lst1})
+
+# combine panel genotypes 
+g1s=""
+while read iid pid; do 
+    g1="./panel/${iid}.bos.50M.geno" 
+    if [ "$g1s" == "" ]; then g1s=${g1}; else g1s+=" "${g1}; fi 
+done < ${lst1}
+
+paste -d " " ${g1s} > ./panel/Cattle_panel.geno.txt
+
+awk '{OFS="\t"}{print $1,"U",$2}' ${lst1} > ./panel/Cattle_panel.ind 
+
+
+############################
+#### 2. Calculate PMR #####
+############################
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/Classification_240526/
+mkdir -p PMR 
+
+pt1=($(pwd)"/")
+listf1="/data2/projects1/AnimalsChina/JLU_cattle_batch01-4_list_240213.txt"
+listf2="/data2/projects1/AnimalsChina/JLU_cattle_perlib_merge_list_240501.txt"
+lst1=${pt1}"JLU_cattle_all_lib_list_240528.txt"
+snpfl="/data2/projects1/AnimalsChina/DataProcessing/Bos/snpf_list_cattle_50M.txt" ## SNPset
+fn1=${pt1}"panel/Cattle_panel"
+scf1=${pt1}"Calculate_PMR_matrix_per_genome.sh"
+scf2=${pt1}"Calculate_PMR_matrix_per_genome.R"
+
+# make list 
+cut -f4 ${listf2}|cut -d "." -f1,2 > temp1 
+fgrep -wvf temp1 ${listf1}| cut -f2,3,4,7 > temp2
+cut -f1,4 ${listf2}|paste - temp1|awk '{OFS="\t"}{print $1,$3,$2,"Cattle"}' >> temp2
+sort -k1,1 -k2,2 -k3,3 temp2 > ${lst1}
+
+# Calculate PMR per genome 
+CMD=${scf1}" "${lst1}" "${snpfl}" "${fn1}" "${scf2}
+
+idnmax=($(wc -l ${lst1}))
+nperrun=16
+
+sbatch --array=1-${idnmax}%${nperrun} -c 8 --mem 22000 -p amd --wrap="$CMD"
+
+# Combine results 
+dt1="/data2/projects1/AnimalsChina/DataProcessing/Bos/"
+of1=${pt1}"AnimalsChina_50M_PMR_for_classification_240528.txt"
+
+snum=0
+while read iid lid rid sp; do 
+    fn1=${pt1}"PMR/"${rid}".bos.50M.pmr.txt"
+    if [ "$snum" -eq 0 ] ;then 
+        cat ${fn1} > ${of1}
+    else 
+        tail -n +2 ${fn1} >> ${of1}
+    fi 
+    let snum+=1
+done < ${lst1}
+
+
+
+
+#####################################################################################
+################ save the following script as "Calculate_PMR_matrix.sh" ############
+
+#!/bin/bash 
+
+lst1=$1
+snpfl=$2
+fn1=$3
+scf2=$4
+
+pt1=($(pwd)"/")
+
+inum=$SLURM_ARRAY_TASK_ID
+
+iid=($(awk -v inum=$inum '{if (NR==inum) print $1}' ${lst1}))
+rid=($(awk -v inum=$inum '{if (NR==inum) print $3}' ${lst1}))
+sp=($(awk -v inum=$inum '{if (NR==inum) print $4}' ${lst1}))
+
+dt1="/data2/projects1/AnimalsChina/DataProcessing/Bos/"
+
+while read prx sfx; do 
+    of1=${pt1}"PMR/"${rid}"."${sfx}".pmr.txt"
+    fn2=${dt1}${iid}"/genotypes/"${rid}"."${sp}"."${sfx}
+    ${scf2} ${fn1} ${fn2} ${of1}
+done < <(awk -v sp=$sp '{if ($1==sp) print $2,$3}' ${snpfl})
+
+
+#####################################################################################
+################ save the following script as "Calculate_PMR_matrix.R" ############
+
+#!/home/donghee_kim/.conda/envs/Admixtools/bin/Rscript
+
+library(data.table)
+library(tictoc)
+
+args = commandArgs(trailingOnly=TRUE)
+
+rm=list()
+fn1=args[1]
+fn2=args[2]
+of1=args[3]
+
+
+## Measure time for matrix multiplication 
+tic("Total PMR calculation")
+tic("Reading genotypes")
+
+# input 
+pgeno <- as.matrix(fread(paste0(fn1,".geno.txt"),sep=" ",header=F,data.table=FALSE))
+pind <- fread(paste0(fn1,".ind"),sep="\t",header=F)
+colnames(pind) <- c("iid","sex","pid")
+
+geno <- as.matrix(fread(paste0(fn2,".geno"),sep=" ",header=F,data.table=FALSE))
+ind <- fread(paste0(fn2,".ind"),sep="\t",header=F)
+colnames(ind) <- c("iid","sex","pid")
+
+toc() # end of reading genotypes
+
+# memory size of matrix 
+print(paste0("The size of genotype matrix : ",as.integer(object.size(geno)/1e6)," Mb") )
+
+# convert genotype matrix 
+tic("Matrix multiplication")
+# first, calculate nmismatch (shifted later)
+geno_c <- geno - 1 
+geno_c[geno_c %% 8 == 0] <- 0 # 9-1 as missing 
+pgeno_c <- pgeno - 1 
+pgeno_c[pgeno_c %% 8 == 0] <- 0 # 9-1 as missing 
+
+count_matrix <- t(geno_c) %*% pgeno_c
+
+# second, calculate nsnps by each individual pairs 
+geno[geno == 0|geno == 2] <- 1
+geno[geno == 9] <- 0
+pgeno[pgeno == 0|pgeno == 2] <- 1
+pgeno[pgeno == 9] <- 0
+
+nsnp_matrix <- t(geno) %*% pgeno
+
+# Third, combine it to calculate pmr 
+nmis_matrix <- -(1/2)*(count_matrix) + (1/2)*(nsnp_matrix)
+pmr_matrix <- nmis_matrix/nsnp_matrix
+
+toc() # end of matrix multiplication
+
+# maximum memory used 
+print(paste0("Maximum memory used : ",as.integer(gc()[2,6])," Mb") )
+
+# convert to data table 
+tic("Coverting into data table")
+iid1_vec <- c(); iid2_vec <- c(); pid1_vec <- c(); pid2_vec <- c()
+nsnp_vec <- c(); nmis_vec <- c(); pmis_vec <- c()
+
+for (i in 1:nrow(ind))  { 
+    for (j in 1:nrow(pind))  { 
+        # unique indivs pairs
+        iid1 <- as.character(ind$iid[i]) ; pid1 <- as.character(ind$pid[i])
+        iid2 <- as.character(pind$iid[j]) ; pid2 <- as.character(pind$pid[j])
+
+        # add to vector 
+        iid1_vec <- c(iid1_vec,iid1); iid2_vec <- c(iid2_vec,iid2); pid1_vec <- c(pid1_vec,pid1); pid2_vec <- c(pid2_vec,pid2)
+        nsnp_vec <- c(nsnp_vec,nsnp_matrix[i,j]); nmis_vec <- c(nmis_vec,nmis_matrix[i,j]); pmis_vec <- c(pmis_vec,pmr_matrix[i,j])
+    }
+}
+
+toc() # end of converting
+
+# write output file 
+tic("Writing")
+
+df <- data.frame(cbind(iid1_vec,pid1_vec,iid2_vec,pid2_vec,nsnp_vec,nmis_vec,pmis_vec))
+colnames(df) <- c("IID1","PID1","IID2","PID2","nsnp","nmismatch","pmismatch")
+
+df[df$pmismatch==NaN,6] <- NA 
+df[df$pmismatch==NaN,7] <- NA 
+
+write.table(df, file=of1, quote=F, sep="\t", row.names=F)
+
+toc() # end of writing 
+
+toc() # end of commands
+
+
+
+
+######################################
+## 3. Taxon identification   ##
+######################################
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/Classification_240526/
+
+R
+
+PMR <- read.table("Testset_50M_PMR_for_classification_240528.txt",header=T)
+df <- read.table("AnimalsChina_50M_PMR_for_classification_240528.txt",header=T)
+panel <- c("aAST","ASA","CHI","DOY","GOA","WAB")
+
+df <- subset(df, PID2 %in% panel)
+rids <- unique(df$IID1)
+
+## pmr database 
+tau <- c(PMR[PMR$IID1=="DSG07C.A0101.SG1.1" & PMR$PID2=="aAST",7], PMR[PMR$IID1=="DSG07C.A0101.SG1.1" & PMR$PID2=="CHI",7])
+chi <- c(PMR[PMR$IID1=="LEI01" & PMR$PID2=="aAST",7], PMR[PMR$IID1=="LEI01" & PMR$PID2=="CHI",7])
+
+## Species class 
+s11 <- c("GOA")
+s12 <- c("aAST","ASA","CHI","DOY","WAB")
+s21 <- c("WAB")
+s22 <- c("aAST","ASA","CHI","DOY")
+s31 <- c("DOY")
+s32 <- c("aAST","ASA","CHI")
+s41 <- c("CHI")
+s42 <- c("aAST","ASA")
+
+## nSNP threshold 
+c1 <- 10 
+c2 <- 30 
+c3 <- 100 
+c4 <- 500 
+c5 <- 2500 
+
+sp_vec <- c(); snp_vec <- c() 
+
+for (i in 1:length(rids)) {
+    rid <- rids[i]
+    df2 <- subset(df, IID1 == rid)
+    snp <- min(df2$nsnp)
+    top <- df2[order(df2$pmismatch),]$PID2[1] # top species 
+    pmr_vec <- c(df2[df2$PID2=="aAST",7],df2[df2$PID2=="CHI",7])
+    dist <- sum((pmr_vec - tau)**2) -  sum((pmr_vec - chi)**2)
+
+    if (snp < c1) { 
+        sp <- "Unknown"
+    } else if (snp >= c1 & top %in% s11 ) { 
+        sp <- "Outgroup" 
+    } else if (snp >= c1 & top %in% s12 & snp < c2 ) { 
+        sp <- "Bovini"
+    } else if (snp >= c2 & top %in% s21 ) {
+        sp <- "Bubalus" 
+    } else if (snp >= c2 & top %in% s22 & snp < c3) {
+        sp <- "Bos" 
+    } else if (snp >= c3 & top %in% s31) { 
+        sp <- "Bos grunniens" 
+    } else if (snp >= c3 & top %in% s32 & snp < c4) { 
+        sp <- "Cattle" 
+    } else if (snp >= c4 & top %in% s32) { 
+        if (dist > 0) {
+            sp <- "Bos indicus"
+        } else if (snp < c5) { 
+            sp <- "Bos taurus"
+        } else if (snp >= c5 & top == "aAST") {
+            sp <- "Domesticated"
+        } else { 
+            sp <- "Bos primigenius"
+        }
+    }
+
+    sp_vec <- c(sp_vec,sp); snp_vec <- c(snp_vec,snp)
+}
+
+df <- read.table("AnimalsChina_50M_PMR_for_classification_240528.txt",header=T)
+s1 <- unique(df$PID2)
+p1 <- list() 
+for (i in 1:length(s1)) { p1[[i]] <- df[df$PID2==s1[i],7] }
+
+iids <- c(); lids <- c()
+for (rid in rids) { lids <- c(lids,strsplit(rid,"\\.SG")[[1]][1]) }
+for (rid in rids) { iids <- c(iids,strsplit(rid,".A")[[1]][1]) }
+
+
+df3 <- data.frame(iids,lids,rids,snp_vec,sp_vec,p1)
+colnames(df3) <- c("IID","LID","RID","nSNP","Species",s1)
+
+of1 <- "AnimalsChina_50M_classification_240528.txt"
+write.table(df3, file=of1, quote=F, sep="\t", row.names=F)
+
+
+
+## plot 
+pdf("PMR_2D_plot_240529.pdf",height=10,width=10)
+
+xlabs <- "PMR with indicine"
+ylabs <- "PMR with taurine"
+
+## Indicine  
+for (sp in c("Bos indicus","Bos primigenius","Domesticated","Bos taurus")) {
+rids <- subset(df3, Species==sp)$RID
+
+plot(0,xlab = xlabs, ylab = ylabs,main = sp, type="n", xlim=c(0,0.15), ylim=c(0,0.15))
+
+for (j in 1:length(rids)) { 
+    rid <- rids[j]
+    tpmr0 <- subset(df,IID1 == rid & PID2=="CHI")$pmismatch[1] 
+    tpmr1 <- subset(df,IID1 == rid & PID2=="aAST")$pmismatch[1] 
+
+    points(tpmr0,tpmr1,col="green",pch = 20)
+
+    abline(a=0, b=1, col="black",lty=2) # y=x
+}
+
+points(chi[2],chi[1],col="blue",cex=2,pch = 4,lwd=2)
+points(tau[2],tau[1],col="red2",cex=2,pch = 4,lwd=2)
+
+}
+
+dev.off()

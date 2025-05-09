@@ -1,0 +1,533 @@
+##########################################
+### 1. Prepare simulated X bam file  ###
+##########################################
+
+# Recipient : Mongolian03 & Guangfeng01
+# Contaminants : Kazakh04, Kazakh05, Wannan03, Wannan04
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/
+mkdir -p Xcontam_241005; cd Xcontam_241005
+
+pt1=($(pwd)"/")
+dt1="/data2/PubData/Chen2018NatCommun/BAM/"
+lst1=${pt1}"Xcontam_simulation_list.txt"
+scf1=${pt1}"Simulating_contaminants.sh" 
+
+# make a list 
+riids="Mongolian03,Guangfeng01"
+ciids="Kazakh04,Kazakh05,Wannan03,Wannan04" 
+crates="2.5,5,10,20" 
+covs="5,10,20,50"
+
+for riid in $(echo ${riids}|sed s/","/" "/g); do 
+    for ciid in $(echo ${ciids}|sed s/","/" "/g); do 
+        for crate in $(echo ${crates}|sed s/","/" "/g); do 
+            for cov in $(echo ${covs}|sed s/","/" "/g); do 
+                if [[ "$riid" == *Mongolian* ]]; then pid1="taurine"; else pid1="indicine"; fi 
+                if [[ "$ciid" == *Kazakh* ]]; then pid2="taurine"; else pid2="indicine"; fi 
+                echo ${riid} ${pid1} ${ciid} ${pid2} ${cov} ${crate}|sed s/" "/"\t"/g >> ${lst1}
+            done 
+        done 
+    done 
+done 
+
+# extract bams 
+for iid in Mongolian03 Guangfeng01 Kazakh04 Kazakh05 Wannan03 Wannan04; do 
+    ibam=${dt1}${iid}"/"${iid}".perind.rmdup.q25.bam"
+    mkdir -p ${iid}
+    #samtools view ${ibam} X -bo ${iid}/${iid}.X.rmdup.q25.bam  
+    samtools index ${iid}/${iid}.X.rmdup.q25.bam  
+    echo $iid "finish"
+done 
+
+# subsample for Recipient
+# 1M reads (1X), 500K reads (0.5X), 200K reads (0.2X), 100K reads (0.1X),  50K reads (0.05X)
+idnmax=($(wc -l ${lst1}))
+nperrun=2
+
+CMD=${scf1}" "${lst1}
+sbatch --array=1-${idnmax}%${nperrun} -c 8 --mem 15000 --wrap="$CMD"
+
+
+#################### write the following script as "Simulating_contaminants.sh" #######################
+
+#!/bin/bash 
+
+lst1=$1 
+inum=$SLURM_ARRAY_TASK_ID
+
+iid1=($(awk -v inum=$inum '{if (NR==inum) print $1}' ${lst1})) # Recipient
+iid2=($(awk -v inum=$inum '{if (NR==inum) print $3}' ${lst1})) # Contaminants
+cov=($(awk -v inum=$inum '{if (NR==inum) print $5}' ${lst1}))
+crate=($(awk -v inum=$inum '{if (NR==inum) print $6}' ${lst1}))
+
+nread=($(echo $cov|awk '{print int($1*10000)}'))
+cread=($(echo $nread $crate|awk '{print int($1*($2/100)/(1-$2/100))}'))
+ibam1="./"${iid1}"/"${iid1}".X.rmdup.q25.bam"
+ibam2="./"${iid2}"/"${iid2}".X.rmdup.q25.bam"
+
+## First, extract recipient reads
+of1="./"${iid1}"/"${iid1}"_"${iid2}".X.cov"${cov}".cont"${crate}".origin.rmdup.q25"
+#samtools view -H ${ibam1} > ${of1}.sam 
+#samtools view ${ibam1} |shuf -n ${nread} |sort -k4,4n >> ${of1}.sam 
+#samtools view ${of1}.sam -bo ${of1}.bam 
+#samtools index ${of1}.bam 
+#rm ${of1}.sam
+
+## without contamination 
+#angsd -i ${of1}.bam -r X:5000000-132000000 -doCounts 1  -iCounts 1 -minMapQ 30 -minQ 20 -out ${of1}.angsdCounts
+
+for sps in taurine indicine all; do 
+    fn1="/data2/projects1/AnimalsChina/analysis/Bos/Xcontam_231225/position/Bos.5688K.X.trunc."${sps}".angsd.frq.gz"
+    sfx=${sps}
+    ## without contamination 
+#    contamination -a ${of1}.angsdCounts.icnts.gz -h ${fn1} -b 5000000 -c 132000000 2> ${of1}.${sfx}.angsd.Xcont
+done 
+
+for iter in {1..100}; do 
+    ## Second, extract contaminant reads
+    of2="./"${iid2}"/"${iid2}".X.cov"${cov}".cont"${crate}".iter"${iter}".rmdup.q25"
+    #samtools view -H ${ibam2} > ${of2}.sam 
+    #samtools view ${ibam2} |shuf -n ${cread} |sort -k4,4n >> ${of2}.sam 
+    #samtools view ${of2}.sam -bo ${of2}.bam 
+    rm ${of2}.sam
+
+    ## Third, mix between them 
+    of3="./"${iid1}"/"${iid1}"_"${iid2}".X.cov"${cov}".cont"${crate}".iter"${iter}".rmdup.q25"
+    # Merge the BAM files 
+    #samtools merge -@ 2 -cpf ${of3}.0.bam ${of1}.bam ${of2}.bam
+
+    ## Sort the output file and index
+    #samtools sort -@ 2 -m 4G ${of3}.0.bam -o ${of3}.bam
+    #samtools index ${of3}.bam
+
+    ## with contamination 
+    #angsd -i ${of3}.bam -r X:5000000-132000000 -doCounts 1  -iCounts 1 -minMapQ 30 -minQ 20 -out ${of3}.angsdCounts
+
+    for sps in taurine indicine all; do 
+        fn1="/data2/projects1/AnimalsChina/analysis/Bos/Xcontam_231225/position/Bos.5688K.X.trunc."${sps}".angsd.frq.gz"
+        sfx=${sps}
+        ## with contamination 
+        contamination -a ${of3}.angsdCounts.icnts.gz -h ${fn1} -b 5000000 -c 132000000 2> ${of3}.${sfx}.angsd.Xcont
+    done 
+    echo $iid1 $iid2 $cov "contam" $crate "iter" $iter "finished."
+done 
+
+
+
+########################################
+### 2. Run ANGSD for recipient reads ###
+########################################
+
+# Recipient : Mongolian03 & Guangfeng01
+# Contaminants : Kazakh04, Kazakh05, Wannan03, Wannan04, HT07C.A0102
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/Xcontam_241005
+
+pt1=($(pwd)"/")
+dt1="/data2/PubData/Chen2018NatCommun/BAM/"
+#lst1=${pt1}"Xcontam_recipient_list.txt"
+lst1=${pt1}"Xcontam_recipient_aurochs_list.txt"
+scf1=${pt1}"ANGSD_Xcont_recipient_241005.sh" 
+
+## Make a list for recipients
+#iids="Mongolian03,Guangfeng01,Kazakh04,Kazakh05,Wannan03,Wannan04" 
+iids="HT07C.A0102"
+for iid in $(echo ${iids}|sed s/","/" "/g); do 
+    ibam=${pt1}${iid}"/"${iid}".X.rmdup.q25.bam"
+    echo -e ${iid}"\t"${ibam} >> ${lst1}
+done 
+
+## Run the job as a job array
+idnmax=($(wc -l ${lst1}))
+nperrun=1
+
+CMD=${scf1}" "${lst1}
+sbatch --array=1-${idnmax}%${nperrun} -c 8 --mem 15000 --wrap="$CMD"
+
+## summarize 
+pt1=($(pwd)"/")
+#lst1=${pt1}"Xcontam_recipient_list.txt"
+lst1=${pt1}"Xcontam_recipient_aurochs_list.txt"
+#of1=${pt1}"Bos_modern.ANGSD_Xcont.241008.txt"
+of1=${pt1}"Bos_aurochs.ANGSD_Xcont.241104.txt"
+
+echo -e "IID\tFREQ\tnSNP\tnFlank\trSNP\trFlank\tMethod\tMoM\tSE_MoM\tML\tSE_ML" > ${of1}
+
+while read iid ibam; do
+    for sps in taurine indicine all; do 
+        rn1=${iid}"/"${iid}".X.rmdup.q25."${sps}".angsd.Xcont"
+        n1=($(awk '{ if ($0~/nSNP/) print $5}' ${rn1} |sed s/[^0-9]/""/g))
+        n2=($(awk '{ if ($0~/nSNP/) print $NF}' ${rn1} |sed s/[^0-9]/""/g))
+        n3=($(awk '{ if ($0~/MisMatch_rate_for_snpsite:/) print $NF}' ${rn1}| cut -d ":" -f2|sed s/" "/""/g))
+        n4=($(awk '{ if ($0~/MisMatch_rate_for_snpsite:/) print $1}' ${rn1}| cut -d ":" -f2|sed s/" "/""/g))
+        me="Method1"
+        n5=($(awk '{ if ($0~/MoM:/) print $4}' ${rn1}|cut -d":" -f2|head -n 2|tail -n 1))
+        n6=($(awk '{ if ($0~/MoM:/) print $5}' ${rn1}|cut -d":" -f2|head -n 2|tail -n 1))
+        n7=($(awk '{ if ($0~/MoM:/) print $6}' ${rn1}|cut -d":" -f2|head -n 2|tail -n 1))
+        n8=($(awk '{ if ($0~/MoM:/) print $7}' ${rn1}|cut -d":" -f2|head -n 2|tail -n 1))
+        echo ${iid} ${sps} ${n1} ${n2} ${n3} ${n4} ${me} ${n5} ${n6} ${n7} ${n8}|sed s/" "/"\t"/g >> ${of1}
+    done 
+done < ${lst1}
+
+##################### write the following script as "ANGSD_Xcont_241005.sh" #######################
+
+#!/bin/bash
+
+lst1=$1 
+inum=$SLURM_ARRAY_TASK_ID
+
+iid=($(awk -v inum=$inum '{if (NR==inum) print $1}' ${lst1})) # Recipient
+ibam=($(awk -v inum=$inum '{if (NR==inum) print $2}' ${lst1})) # Recipient bam 
+
+cd ${iid}
+
+for sps in taurine indicine all; do 
+    fn1="/data2/projects1/AnimalsChina/analysis/Bos/Xcontam_231225/position/Bos.5688K.X.trunc."${sps}".angsd.frq.gz"
+    sfx=${sps}
+
+    ## without contamination 
+    of1=($(basename ${ibam}|sed s/".bam"/""/g))
+    angsd -i ${of1}.bam -r X:5000000-132000000 -doCounts 1  -iCounts 1 -minMapQ 30 -minQ 20 -out ${of1}.${sfx}.angsdCounts
+    contamination -a ${of1}.${sfx}.angsdCounts.icnts.gz -h ${fn1} -b 5000000 -c 132000000 2> ${of1}.${sfx}.angsd.Xcont
+done 
+
+
+###########################################
+### 3. Run ANGSD for contaminated reads ###
+###########################################
+
+# Recipient : Mongolian03 & Guangfeng01
+# Contaminants : Kazakh04, Kazakh05, Wannan03, Wannan04
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/Xcontam_241005
+
+pt1=($(pwd)"/")
+dt1="/data2/PubData/Chen2018NatCommun/BAM/"
+lst1=${pt1}"Xcontam_simulation_list.txt"
+scf1=${pt1}"ANGSD_Xcont_241005.sh" 
+
+## Run the job as a job array
+idnmax=($(wc -l ${lst1}))
+nperrun=12
+
+CMD=${scf1}" "${lst1}
+sbatch --array=1-${idnmax}%${nperrun} -c 4 --mem 7500 -w node03 --wrap="$CMD"
+
+
+## summarize 
+pt1=($(pwd)"/")
+lst1=${pt1}"Xcontam_simulation_list.txt"
+of1=${pt1}"Bos_simulation.ANGSD_Xcont.241104.txt"
+
+echo -e "Iter\tR_IID\tR_PID\tC_IID\tC_PID\tCov\tCr\tFREQ\tnSNP\tnFlank\trSNP\trFlank\tMethod\tMoM\tSE_MoM\tML\tSE_ML" > ${of1}
+
+while read iid1 pid1 iid2 pid2 cov cr; do
+    for iter in {1..100}; do 
+        for sps in taurine indicine all; do 
+            rn1=${iid1}"/"${iid1}"_"${iid2}".X.cov"${cov}".cont"${cr}".iter"${iter}".rmdup.q25."${sps}".angsd.Xcont"
+            n1=($(awk '{ if ($0~/nSNP/) print $5}' ${rn1} |sed s/[^0-9]/""/g))
+            n2=($(awk '{ if ($0~/nSNP/) print $NF}' ${rn1} |sed s/[^0-9]/""/g))
+            n3=($(awk '{ if ($0~/MisMatch_rate_for_snpsite:/) print $NF}' ${rn1}| cut -d ":" -f2|sed s/" "/""/g))
+            n4=($(awk '{ if ($0~/MisMatch_rate_for_snpsite:/) print $1}' ${rn1}| cut -d ":" -f2|sed s/" "/""/g))
+            me="Method1"
+            n5=($(awk '{ if ($0~/MoM:/) print $4}' ${rn1}|cut -d":" -f2|head -n 2|tail -n 1))
+            n6=($(awk '{ if ($0~/MoM:/) print $5}' ${rn1}|cut -d":" -f2|head -n 2|tail -n 1))
+            n7=($(awk '{ if ($0~/MoM:/) print $6}' ${rn1}|cut -d":" -f2|head -n 2|tail -n 1))
+            n8=($(awk '{ if ($0~/MoM:/) print $7}' ${rn1}|cut -d":" -f2|head -n 2|tail -n 1))
+            echo ${iter} ${iid1} ${pid1} ${iid2} ${pid2} ${cov} ${cr} ${sps} ${n1} ${n2} ${n3} ${n4} ${me} ${n5} ${n6} ${n7} ${n8}|sed s/" "/"\t"/g >> ${of1}
+        done 
+    done 
+    echo ${iid1} ${pid1} ${iid2} ${pid2} ${cov} ${cr} "is done."
+done < ${lst1}
+
+# not contaminaed 
+while read iid1 pid1 iid2 pid2 cov cr; do
+    cr2=0 
+    iter=0
+    for sps in taurine indicine all; do 
+        rn1=${iid1}"/"${iid1}"_"${iid2}".X.cov"${cov}".cont"${cr}".origin.rmdup.q25."${sps}".angsd.Xcont"
+        n1=($(awk '{ if ($0~/nSNP/) print $5}' ${rn1} |sed s/[^0-9]/""/g))
+        n2=($(awk '{ if ($0~/nSNP/) print $NF}' ${rn1} |sed s/[^0-9]/""/g))
+        n3=($(awk '{ if ($0~/MisMatch_rate_for_snpsite:/) print $NF}' ${rn1}| cut -d ":" -f2|sed s/" "/""/g))
+        n4=($(awk '{ if ($0~/MisMatch_rate_for_snpsite:/) print $1}' ${rn1}| cut -d ":" -f2|sed s/" "/""/g))
+        me="Method1"
+        n5=($(awk '{ if ($0~/MoM:/) print $4}' ${rn1}|cut -d":" -f2|head -n 2|tail -n 1))
+        n6=($(awk '{ if ($0~/MoM:/) print $5}' ${rn1}|cut -d":" -f2|head -n 2|tail -n 1))
+        n7=($(awk '{ if ($0~/MoM:/) print $6}' ${rn1}|cut -d":" -f2|head -n 2|tail -n 1))
+        n8=($(awk '{ if ($0~/MoM:/) print $7}' ${rn1}|cut -d":" -f2|head -n 2|tail -n 1))
+        echo ${iter} ${iid1} ${pid1} ${iid2} ${pid2} ${cov} ${cr2} ${sps} ${n1} ${n2} ${n3} ${n4} ${me} ${n5} ${n6} ${n7} ${n8}|sed s/" "/"\t"/g >> ${of1}
+    done 
+    echo ${iid1} ${pid1} ${iid2} ${pid2} ${cov} ${cr} "is done."
+done < ${lst1}
+
+
+##################### write the following script as "ANGSD_Xcont_241005.sh" #######################
+
+#!/bin/bash
+
+lst1=$1 
+inum=$SLURM_ARRAY_TASK_ID
+
+iid1=($(awk -v inum=$inum '{if (NR==inum) print $1}' ${lst1})) # Recipient
+iid2=($(awk -v inum=$inum '{if (NR==inum) print $3}' ${lst1})) # Contaminants
+cov=($(awk -v inum=$inum '{if (NR==inum) print $5}' ${lst1}))
+crate=($(awk -v inum=$inum '{if (NR==inum) print $6}' ${lst1}))
+
+pt1=($(pwd)"/")
+
+for sps in taurine indicine all; do 
+    fn1="/data2/projects1/AnimalsChina/analysis/Bos/Xcontam_231225/position/Bos.5688K.X.trunc."${sps}".angsd.frq.gz"
+    sfx=${sps}
+
+    ## without contamination 
+    of1=${pt1}${iid1}"/"${iid1}"_"${iid2}".X.cov"${cov}".cont"${crate}".origin.rmdup.q25"
+    angsd -i ${of1}.bam -r X:5000000-132000000 -doCounts 1  -iCounts 1 -minMapQ 30 -minQ 20 -out ${of1}.${sfx}.angsdCounts
+    contamination -a ${of1}.${sfx}.angsdCounts.icnts.gz -h ${fn1} -b 5000000 -c 132000000 2> ${of1}.${sfx}.angsd.Xcont
+
+    for iter in {1..10}; do 
+        of2=${pt1}${iid1}"/"${iid1}"_"${iid2}".X.cov"${cov}".cont"${crate}".iter"${iter}".rmdup.q25"
+        angsd -i ${of2}.bam -r X:5000000-132000000 -doCounts 1  -iCounts 1 -minMapQ 30 -minQ 20 -out ${of2}.${sfx}.angsdCounts
+        contamination -a ${of2}.${sfx}.angsdCounts.icnts.gz -h ${fn1} -b 5000000 -c 132000000 2> ${of2}.${sfx}.angsd.Xcont
+    done
+done 
+
+
+
+
+##########################################################
+### 4. Prepare simulated X bam file (aurochs, taurine) ###
+##########################################################
+
+# Recipient : Mongolian03, HH13C.A0101
+# Contaminants : HT07C.A0102, Kazakh04 
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/Xcontam_241005
+
+pt1=($(pwd)"/")
+dt1="/data2/projects1/AnimalsChina/DataProcessing/Bos/"
+lst1=${pt1}"Xcontam_aurochs_simulation_list.txt"
+scf1=${pt1}"Simulating_contaminants_aurochs.sh" 
+
+# extract bams 
+for rid in HH13C.A0101.SG1.1 HT07C.A0102.SG1; do 
+    iid=($(echo ${rid}|cut -d"." -f1))
+    lid=($(echo ${rid}|cut -d"." -f1,2))
+    ibam=${dt1}${iid}"/BAM/"${rid}".Cattle.L35.mapped.rmdup.q30.bam"
+    mkdir -p ${lid}
+    #samtools view ${ibam} X -bo ${lid}/${lid}.X.rmdup.q25.bam  
+    #samtools index ${lid}/${lid}.X.rmdup.q25.bam  
+    samtools stats ${lid}/${lid}.X.rmdup.q25.bam > ${lid}/${lid}.X.rmdup.q25.stat.txt 
+    echo $lid "finish"
+done 
+
+# make a list 
+pairs="Mongolian03_HT07C.A0102,HH13C.A0101_HT07C.A0102,HH13C.A0101_Kazakh04"
+crates="2.5,5,10,20" 
+covs="5,10,20,50"
+
+for pair in $(echo ${pairs}|sed s/","/" "/g); do 
+    riid=($(echo ${pair}|cut -d"_" -f1))
+    ciid=($(echo ${pair}|cut -d"_" -f2))
+    for crate in $(echo ${crates}|sed s/","/" "/g); do 
+        for cov in $(echo ${covs}|sed s/","/" "/g); do 
+            if [[ "$riid" == *Mongolian* ]]; then 
+                pid1="taurine" ; len1="150"
+            else 
+                pid1="aurochs" ; len1=($(grep "average length" ${riid}/${riid}.X.rmdup.q25.stat.txt|awk '{print $NF}' ))
+            fi 
+            if [[ "$ciid" == *Kazakh* ]]; then 
+                pid2="taurine";  len2="150"
+            else 
+                pid2="aurochs";  len2=($(grep "average length" ${ciid}/${ciid}.X.rmdup.q25.stat.txt|awk '{print $NF}' ))
+            fi 
+            echo ${riid} ${pid1} ${len1} ${ciid} ${pid2} ${len2} ${cov} ${crate}|sed s/" "/"\t"/g >> ${lst1}
+        done 
+    done 
+done 
+
+# subsample for Recipient
+# 1M reads (1X), 500K reads (0.5X), 200K reads (0.2X), 100K reads (0.1X),  50K reads (0.05X)
+idnmax=($(wc -l ${lst1}))
+nperrun=2
+
+CMD=${scf1}" "${lst1}
+sbatch --array=1-${idnmax}%${nperrun} -c 8 --mem 15000 --wrap="$CMD"
+
+
+#################### write the following script as "Simulating_contaminants_aurochs.sh" #######################
+
+#!/bin/bash 
+
+lst1=$1 
+inum=$SLURM_ARRAY_TASK_ID
+
+iid1=($(awk -v inum=$inum '{if (NR==inum) print $1}' ${lst1})) # Recipient
+iid2=($(awk -v inum=$inum '{if (NR==inum) print $4}' ${lst1})) # Contaminants
+len1=($(awk -v inum=$inum '{if (NR==inum) print $3}' ${lst1}))
+len2=($(awk -v inum=$inum '{if (NR==inum) print $6}' ${lst1}))
+cov=($(awk -v inum=$inum '{if (NR==inum) print $7}' ${lst1}))
+crate=($(awk -v inum=$inum '{if (NR==inum) print $8}' ${lst1}))
+
+nread=($(echo $cov $len1|awk '{print int($1*10000*150/$2)}'))
+cread=($(echo $nread $crate $len1 $len2|awk '{print int(($1*($2/100)*$3/$4)/(1-$2/100))}'))
+ibam1="./"${iid1}"/"${iid1}".X.rmdup.q25.bam"
+ibam2="./"${iid2}"/"${iid2}".X.rmdup.q25.bam"
+
+## First, extract recipient reads
+of1="./"${iid1}"/"${iid1}"_"${iid2}".X.cov"${cov}".cont"${crate}".origin.rmdup.q25"
+samtools view -H ${ibam1} > ${of1}.sam 
+samtools view ${ibam1} |shuf -n ${nread} |sort -k4,4n >> ${of1}.sam 
+samtools view ${of1}.sam -bo ${of1}.bam 
+samtools index ${of1}.bam 
+rm ${of1}.sam
+
+## without contamination 
+angsd -i ${of1}.bam -r X:5000000-132000000 -doCounts 1  -iCounts 1 -minMapQ 30 -minQ 20 -out ${of1}.angsdCounts
+
+for sps in taurine indicine all; do 
+    fn1="/data2/projects1/AnimalsChina/analysis/Bos/Xcontam_231225/position/Bos.5688K.X.trunc."${sps}".angsd.frq.gz"
+    sfx=${sps}
+    ## without contamination 
+    contamination -a ${of1}.angsdCounts.icnts.gz -h ${fn1} -b 5000000 -c 132000000 2> ${of1}.${sfx}.angsd.Xcont
+done 
+
+for iter in {1..100}; do 
+    ## Second, extract contaminant reads
+    of2="./"${iid2}"/"${iid2}".X.cov"${cov}".cont"${crate}".iter"${iter}".rmdup.q25"
+    samtools view -H ${ibam2} > ${of2}.sam 
+    samtools view ${ibam2} |shuf -n ${cread} |sort -k4,4n >> ${of2}.sam 
+    samtools view ${of2}.sam -bo ${of2}.bam 
+    rm ${of2}.sam
+
+    ## Third, mix between them 
+    of3="./"${iid1}"/"${iid1}"_"${iid2}".X.cov"${cov}".cont"${crate}".iter"${iter}".rmdup.q25"
+    # Merge the BAM files 
+    samtools merge -@ 2 -cpf ${of3}.0.bam ${of1}.bam ${of2}.bam
+
+    ## Sort the output file and index
+    samtools sort -@ 2 -m 4G ${of3}.0.bam -o ${of3}.bam
+    samtools index ${of3}.bam
+
+    ## with contamination 
+    angsd -i ${of3}.bam -r X:5000000-132000000 -doCounts 1  -iCounts 1 -minMapQ 30 -minQ 20 -out ${of3}.angsdCounts
+
+    for sps in taurine indicine all; do 
+        fn1="/data2/projects1/AnimalsChina/analysis/Bos/Xcontam_231225/position/Bos.5688K.X.trunc."${sps}".angsd.frq.gz"
+        sfx=${sps}
+        ## with contamination 
+        contamination -a ${of3}.angsdCounts.icnts.gz -h ${fn1} -b 5000000 -c 132000000 2> ${of3}.${sfx}.angsd.Xcont
+    done 
+    echo $iid1 $iid2 $cov "contam" $crate "iter" $iter "finished."
+done 
+
+
+###########################################
+### 5. Run ANGSD for contaminated reads ###
+###########################################
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/Xcontam_241005
+
+pt1=($(pwd)"/")
+lst1=${pt1}"Xcontam_aurochs_simulation_list.txt"
+scf1=${pt1}"ANGSD_Xcont_aurochs_241008.sh" 
+
+## Run the job as a job array
+idnmax=($(wc -l ${lst1}))
+nperrun=6
+
+CMD=${scf1}" "${lst1}
+sbatch --array=1-${idnmax}%${nperrun} -c 4 --mem 7500 -w node03 --wrap="$CMD"
+
+
+## summarize 
+pt1=($(pwd)"/")
+lst1=${pt1}"Xcontam_aurochs_simulation_list.txt"
+of1=${pt1}"Bos_simulation_aurochs.ANGSD_Xcont.241104.txt"
+
+echo -e "Iter\tR_IID\tR_PID\tC_IID\tC_PID\tCov\tCr\tFREQ\tnSNP\tnFlank\trSNP\trFlank\tMethod\tMoM\tSE_MoM\tML\tSE_ML" > ${of1}
+
+while read iid1 pid1 len1 iid2 pid2 len2 cov cr; do
+    for iter in {1..100}; do 
+        for sps in taurine indicine all; do 
+            rn1=${iid1}"/"${iid1}"_"${iid2}".X.cov"${cov}".cont"${cr}".iter"${iter}".rmdup.q25."${sps}".angsd.Xcont"
+            n1=($(awk '{ if ($0~/nSNP/) print $5}' ${rn1} |sed s/[^0-9]/""/g))
+            n2=($(awk '{ if ($0~/nSNP/) print $NF}' ${rn1} |sed s/[^0-9]/""/g))
+            n3=($(awk '{ if ($0~/MisMatch_rate_for_snpsite:/) print $NF}' ${rn1}| cut -d ":" -f2|sed s/" "/""/g))
+            n4=($(awk '{ if ($0~/MisMatch_rate_for_snpsite:/) print $1}' ${rn1}| cut -d ":" -f2|sed s/" "/""/g))
+            me="Method1"
+            n5=($(awk '{ if ($0~/MoM:/) print $4}' ${rn1}|cut -d":" -f2|head -n 2|tail -n 1))
+            n6=($(awk '{ if ($0~/MoM:/) print $5}' ${rn1}|cut -d":" -f2|head -n 2|tail -n 1))
+            n7=($(awk '{ if ($0~/MoM:/) print $6}' ${rn1}|cut -d":" -f2|head -n 2|tail -n 1))
+            n8=($(awk '{ if ($0~/MoM:/) print $7}' ${rn1}|cut -d":" -f2|head -n 2|tail -n 1))
+            echo ${iter} ${iid1} ${pid1} ${iid2} ${pid2} ${cov} ${cr} ${sps} ${n1} ${n2} ${n3} ${n4} ${me} ${n5} ${n6} ${n7} ${n8}|sed s/" "/"\t"/g >> ${of1}
+        done 
+    done 
+    echo ${iid1} ${pid1} ${iid2} ${pid2} ${cov} ${cr} "is done."
+done < ${lst1}
+
+# not contaminaed 
+while read iid1 pid1 len1 iid2 pid2 len2 cov cr; do
+    cr2=0 
+    iter=0
+    for sps in taurine indicine all; do 
+        rn1=${iid1}"/"${iid1}"_"${iid2}".X.cov"${cov}".cont"${cr}".origin.rmdup.q25."${sps}".angsd.Xcont"
+        n1=($(awk '{ if ($0~/nSNP/) print $5}' ${rn1} |sed s/[^0-9]/""/g))
+        n2=($(awk '{ if ($0~/nSNP/) print $NF}' ${rn1} |sed s/[^0-9]/""/g))
+        n3=($(awk '{ if ($0~/MisMatch_rate_for_snpsite:/) print $NF}' ${rn1}| cut -d ":" -f2|sed s/" "/""/g))
+        n4=($(awk '{ if ($0~/MisMatch_rate_for_snpsite:/) print $1}' ${rn1}| cut -d ":" -f2|sed s/" "/""/g))
+        me="Method1"
+        n5=($(awk '{ if ($0~/MoM:/) print $4}' ${rn1}|cut -d":" -f2|head -n 2|tail -n 1))
+        n6=($(awk '{ if ($0~/MoM:/) print $5}' ${rn1}|cut -d":" -f2|head -n 2|tail -n 1))
+        n7=($(awk '{ if ($0~/MoM:/) print $6}' ${rn1}|cut -d":" -f2|head -n 2|tail -n 1))
+        n8=($(awk '{ if ($0~/MoM:/) print $7}' ${rn1}|cut -d":" -f2|head -n 2|tail -n 1))
+        echo ${iter} ${iid1} ${pid1} ${iid2} ${pid2} ${cov} ${cr2} ${sps} ${n1} ${n2} ${n3} ${n4} ${me} ${n5} ${n6} ${n7} ${n8}|sed s/" "/"\t"/g >> ${of1}
+    done 
+    echo ${iid1} ${pid1} ${iid2} ${pid2} ${cov} ${cr} "is done."
+done < ${lst1}
+
+
+##################### write the following script as "ANGSD_Xcont_241005.sh" #######################
+
+#!/bin/bash
+
+lst1=$1 
+inum=$SLURM_ARRAY_TASK_ID
+
+iid1=($(awk -v inum=$inum '{if (NR==inum) print $1}' ${lst1})) # Recipient
+iid2=($(awk -v inum=$inum '{if (NR==inum) print $4}' ${lst1})) # Contaminants
+cov=($(awk -v inum=$inum '{if (NR==inum) print $7}' ${lst1}))
+crate=($(awk -v inum=$inum '{if (NR==inum) print $8}' ${lst1}))
+
+pt1=($(pwd)"/")
+
+for sps in taurine indicine all; do 
+    fn1="/data2/projects1/AnimalsChina/analysis/Bos/Xcontam_231225/position/Bos.5688K.X.trunc."${sps}".angsd.frq.gz"
+    sfx=${sps}
+
+    ## without contamination 
+    of1=${pt1}${iid1}"/"${iid1}"_"${iid2}".X.cov"${cov}".cont"${crate}".origin.rmdup.q25"
+    angsd -i ${of1}.bam -r X:5000000-132000000 -doCounts 1  -iCounts 1 -minMapQ 30 -minQ 20 -out ${of1}.${sfx}.angsdCounts
+    contamination -a ${of1}.${sfx}.angsdCounts.icnts.gz -h ${fn1} -b 5000000 -c 132000000 2> ${of1}.${sfx}.angsd.Xcont
+
+    for iter in {1..10}; do 
+        of2=${pt1}${iid1}"/"${iid1}"_"${iid2}".X.cov"${cov}".cont"${crate}".iter"${iter}".rmdup.q25"
+        angsd -i ${of2}.bam -r X:5000000-132000000 -doCounts 1  -iCounts 1 -minMapQ 30 -minQ 20 -out ${of2}.${sfx}.angsdCounts
+        contamination -a ${of2}.${sfx}.angsdCounts.icnts.gz -h ${fn1} -b 5000000 -c 132000000 2> ${of2}.${sfx}.angsd.Xcont
+    done
+done 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

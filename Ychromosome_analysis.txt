@@ -1,0 +1,559 @@
+#################################################
+#### 1. Call Y variants from aurochs dataset ####
+#################################################
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/
+mkdir -p Y_250423; cd Y_250423
+mkdir -p VCF
+
+pt1=($(pwd)"/")
+mask1="/data2/projects1/AnimalsHapSharing/MSMC/mappability/ARS-UCD1.2_chrY.mask.bed.gz"
+mask2=${pt1}"Bos.chrY.mask.bed"
+ref="/home/References/Cattle/ARS-UCD1.2.chrY.fa"
+fn1="/data2/PubData/Rossi2024Nature/analysis/genotypes/Rossi2024.5688K"
+listf=${pt1}"Rossi2024nature_list.txt"
+dt1="/data2/PubData/Rossi2024Nature/DataProcessing/"
+scf1=${pt1}"Y_haplotypecaller.sh"
+
+# male & coverage > 1
+info=${dt1}"Rossi2024Nature_mapping_summary.txt"
+
+sp="Cattle"
+if [[ -f "$listf" ]]; then rm ${listf}; fi 
+while read rid; do 
+    iid=($(echo ${rid}|cut -d"." -f1))
+    lid=($(echo ${rid}|cut -d"." -f1,2))
+    sid=${rid}"."${sp}
+    ibam=($(realpath ${dt1}${iid}/BAM/${sid}/${sid}.*.rmdup.q30.bam))
+    echo ${iid} ${lid} ${rid} ${sp} ${ibam} |sed s/" "/"\t"/g >> ${listf}
+done < <(awk '{if ($2=="M") print $1}' ${fn1}.ind | fgrep -wf - ${info}|awk '{if ($24 > 1) print $3}')
+
+## HaplotypeCaller 
+CMD=${scf1}" "${listf}" "${ref}
+
+idnmax=($(wc -l ${listf}))
+nperrun=8
+
+sbatch --array=1-${idnmax}%${nperrun} -c 8 --mem 15000 -p amd --wrap="$CMD"
+
+##############################################################
+#### write the following script as "Y_haplotypecaller.sh" ####
+
+#!/bin/bash
+
+listf=$1
+ref=$2
+inum=$SLURM_ARRAY_TASK_ID
+
+iid=($(awk -v inum=$inum '{if (NR==inum) print $1}' ${listf}))
+rid=($(awk -v inum=$inum '{if (NR==inum) print $3}' ${listf}))
+sp=($(awk -v inum=$inum '{if (NR==inum) print $4}' ${listf}))
+ibam=($(awk -v inum=$inum '{if (NR==inum) print $5}' ${listf}))
+
+mkdir -p ./VCF/${rid}
+cd ./VCF/${rid}
+
+of1=${rid}"."${sp}".Y"
+
+## extract MT bam
+gatk HaplotypeCaller -I ${ibam} -L Y -R ${ref} -ERC GVCF -ploidy 1 -O ${of1}.g.vcf.gz
+
+
+
+########################
+#### 2. CombineGVCF ####
+########################
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/Y_250423
+mkdir -p CombineGVCF
+
+pt1=($(pwd)"/")
+fn1="/data1/PubData/CattleMerged_210420/CombineGVCF595/Y.g.vcf.gz"
+ref="/home/References/Cattle/ARS-UCD1.2.chrY.fa"
+listf=${pt1}"Rossi2024nature_list.txt"
+scf1=${pt1}"Combine_gVCFs.sh"
+sp="Cattle"
+
+## Combine GVCF
+memsize="20000"
+CMD=${scf1}" "${listf}" "${fn1}" "${sp}" "${ref}" "${memsize}
+
+sbatch -c 12 --mem 22000 -p amd --wrap="$CMD"
+
+
+
+##############################################################
+#### write the following script as "Y_haplotypecaller.sh" ####
+
+#!/bin/bash
+
+pt1=($(pwd)"/")
+
+listf=$1   ## individual list file
+fn1=$2 # master gvcf 
+sp=$3 ## Species
+ref=$4  ## Reference 
+memsize=$5
+
+GATKstr="java -Xmx"${memsize}"m -jar /opt/ohpc/pub/apps/gatk/gatk-3.8.1.0/GenomeAnalysisTK.jar"
+
+of1="./CombineGVCF/Bos.Y"
+
+## Create a string of input vcf for the combineGVCFs module
+vcfstr="-V "${fn1}
+while read rid; do 
+    invcf="./VCF/"${rid}"/"${rid}"."${sp}".Y.g.vcf.gz"
+    vcfstr+=" -V "${invcf} 
+done < <(awk -v sp=$sp '{ if ($4==sp) print $3}' ${listf})
+
+## Merge all GVCFs and Run GenotypeGVCFs by chromosome using module in GATK
+${GATKstr} -T CombineGVCFs -R ${ref} ${vcfstr} -L Y -o ${of1}.g.vcf.gz
+${GATKstr} -T GenotypeGVCFs -R ${ref} -V ${of1}.g.vcf.gz -o ${of1}.vcf.gz -stand_call_conf 20.0
+
+
+##############################################################################
+## 3. Apply the proper filters based on the variant stat distribution,      ##
+##    and split the high-quality variants to the following categories:      ##
+##      1) bi-allelic SNPs                                                  ##
+##      2) bi-allelic InDels                                                ##
+##      3) multi-allelic SNPs/InDels                                        ##
+##############################################################################
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/Y_250423/
+
+pt1=($(pwd)"/")
+fn1=${pt1}"CombineGVCF/Bos.Y"
+ref="/home/References/Cattle/ARS-UCD1.2.chrY.fa"
+scf1=${pt1}"variant_filtration_script.sh"
+
+## statistics 
+invcf=${fn1}".vcf.gz"
+ovcf=${fn1}".biSNP"
+tn1=${ovcf}"_temp1"
+
+## Take SNPs with QUAL >= 30
+gatk --java-options '-Xmx8G' SelectVariants -V ${invcf} -R ${ref} \
+    -select "QUAL >= 30.0" --select-type-to-include SNP -O ${tn1}_1.vcf
+
+## Remove deletions and multi-allelic SNPs
+## and then reformat into the gzipped format
+cat ${tn1}_1.vcf | \
+    awk '{if ($0 ~ /^#/) print $0;
+          else if (($4 == "A" || $4 == "C" || $4 == "G" || $4 == "T") && ($5 == "A" || $5 == "C" || $5 == "G" || $5 == "T")) print $0}' | \
+    bcftools view -O z -o ${ovcf}.vcf.gz -
+
+## Index the output VCF file
+gatk IndexFeatureFile -F ${ovcf}.vcf.gz
+
+## Extract variant statistics
+echo 'CHROM POS REF ALT QUAL DP QD SOR FS MQ MQRankSum ReadPosRankSum ExcessHet AN AC' | sed s/" "/"\t"/g > ${ovcf}.txt
+bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\t%QUAL\t%DP\t%QD\t%SOR\t%FS\t%MQ\t%MQRankSum\t%ReadPosRankSum\t%ExcessHet\t%AN\t%AC\n' \
+    ${ovcf}.vcf.gz >> ${ovcf}.txt
+gzip ${ovcf}.txt
+
+
+## Run the jobs
+CMD=${scf1}" "${ref}
+sbatch -c 12 --mem 22000 -p amd --wrap="$CMD"
+
+rm slurm-*
+
+############
+
+R 
+
+df <- read.table(gzfile("./CombineGVCF/Bos.Y.biSNP.txt.gz"),header=T)
+summary(df$DP)
+
+
+##########################################################################
+## Save the following script as "variant_filtration_script.sh"   ##
+
+#!/bin/bash
+
+ref=$1   ## Reference 
+
+of1="./CombineGVCF/Bos.Y"
+
+invcf=${of1}".vcf.gz"
+ovcf=${of1}".filtered"
+tn1=${ovcf}"_temp1"
+
+## Apply the standard filtering 
+## Median DP is 815
+## so I remove < 163 and > 4075
+gatk --java-options '-Xmx8G' VariantFiltration -V ${invcf} -R ${ref} \
+    -filter "QUAL < 30.0 || DP < 200 || DP > 4000 || QD < 2.0 || SOR > 3.0 || FS > 60.0 || MQ <= 40.0 || MQRankSum < -12.5 || ReadPosRankSum < -8.0" \
+    --filter-name "LowQual" -O ${tn1}_1.vcf.gz
+
+## Keep the filtered variants
+bcftools view -i 'FILTER="PASS"' -O z -o ${ovcf}.vcf.gz ${tn1}_1.vcf.gz
+bcftools index -f ${ovcf}.vcf.gz
+
+## 1. Extract bi-allelic SNPs
+zcat ${ovcf}.vcf.gz | \
+    awk '{if ($0 ~ /^#/) print $0;
+          else if (($4 == "A" || $4 == "C" || $4 == "G" || $4 == "T") && ($5 == "A" || $5 == "C" || $5 == "G" || $5 == "T")) print $0}' | \
+    bcftools view -O z -o ${ovcf}.biSNP.vcf.gz -
+gatk IndexFeatureFile -F ${ovcf}.biSNP.vcf.gz
+
+## 2. Extract bi-allelic indels
+zcat ${ovcf}.vcf.gz | \
+    awk '{if ($0 ~ /^#/) print $0;
+          else if ($4 !~ /,/ && $5 !~ /,/ && (length($4) > 1 || length($5) > 1)) print $0}' | \
+    bcftools view -O z -o ${ovcf}.biInDels.vcf.gz -
+gatk IndexFeatureFile -F ${ovcf}.biInDels.vcf.gz
+
+## 3. Extract multi-allelic variants
+zcat ${ovcf}.vcf.gz | \
+    awk '{if ($0 ~ /^#/) print $0;
+          else if ($4 ~ /,/ || $5 ~ /,/) print $0}' | \
+    bcftools view -O z -o ${ovcf}.multi.vcf.gz -
+gatk IndexFeatureFile -F ${ovcf}.multi.vcf.gz
+
+## Remove tmeporary files
+rm ${tn1}_*
+
+
+#########################################
+## 4. Convert to eigenstrat format     ##
+#########################################
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/Y_250423/
+
+pt1=($(pwd)"/")
+fn1=${pt1}"CombineGVCF/Bos.Y.filtered.biSNP.vcf.gz"
+of1=${pt1}"Bos.Y.panel"
+of2=${pt1}"Bos.Y.degen.panel"
+of3=${pt1}"Bos.Y.degen.tv.panel"
+info="/data1/PubData/CattleMerged_210420/CombineGVCF595/New_sample_names.txt"
+mask1="/data2/projects1/AnimalsHapSharing/MSMC/mappability/ARS-UCD1.2_chrY.mask.bed.gz"
+mask2=${pt1}"Bos.chrY.mask.bed"
+gpc="0.9"
+
+## genotyping 
+bcftools query -f '[%GT]\n' ${fn1}|sed s/"\."/"9"/g |sed s/"0"/"2"/g|sed s/"1"/"0"/g > ${of1}.geno # 0 to 2 (reference allele), 1 to 0 (alternative), . to 9 (missing)
+
+## make snp file
+bcftools query -f '%CHROM  %POS  %REF  %ALT{0}\n' ${fn1} |awk '{OFS="\t"} {print $1":"$2,$1,"0.0",$2,$3,$4}'  > ${of1}.temp.snp
+cut -f2,4 ${of1}.temp.snp |awk '{OFS="\t"}{print $1,$2}' > ${of1}.pos.list.txt
+sed s/"Y"/"31"/g ${of1}.temp.snp > ${of1}.snp
+
+rm ${of1}.temp.snp
+
+## make ind file 
+if [[ -f "$of1.ind" ]]; then rm ${of1}.ind ; fi 
+while read iid; do 
+    nid=($(awk -v iid=$iid '{ if ($1==iid) print $2}' ${info}))
+    if [[ "$nid" == "" ]]; then nid=($(echo ${iid} |cut -d"." -f1)); fi 
+    sex="M"
+    echo -e ${nid}"\t"${sex}"\t"${nid} >> ${of1}.ind
+done < <(bcftools view -h ${fn1}|tail -n 1|sed s/"\t"/"\n"/g |tail -n +10)
+
+## X-degenerate region 
+# 2.5–3.9 Mb and 42.2–43.3 Mb
+echo -e "Y\t2500000\t3900000" > temp1.bed  
+echo -e "Y\t42200000\t43300000" >> temp1.bed 
+zcat ${mask1}|bedtools intersect -a - -b temp1.bed > ${mask2}
+
+# extract X-degen region 
+paste ${of1}.snp ${of1}.geno | awk '{OFS="\t"}{print "Y",$4-1,$4,$7}' |bedtools intersect -a - -b ${mask2} -wa |cut -f4 > ${of2}.geno 
+awk '{OFS="\t"}{print "Y",$4-1,$4,$0}' ${of1}.snp|bedtools intersect -a - -b ${mask2} -wa |cut -f4- > ${of2}.snp 
+cp ${of1}.ind ${of2}.ind 
+awk '{OFS="\t"}{print "Y",$4}' ${of2}.snp  > ${of2}.pos.list.txt 
+
+# extract transversion
+paste ${of2}.snp ${of2}.geno |awk '{OFS="\t"}{ if ( ($5$6!="CT") && ($5$6!="TC") && ($5$6!="GA") && ($5$6!="AG") ) print $7}' > ${of3}.geno 
+awk '{OFS="\t"}{ if ( ($5$6!="CT") && ($5$6!="TC") && ($5$6!="GA") && ($5$6!="AG") ) print $0}' ${of2}.snp > ${of3}.snp 
+cp ${of2}.ind ${of3}.ind 
+awk '{OFS="\t"}{print "Y",$4}' ${of3}.snp  > ${of3}.pos.list.txt 
+
+
+
+##################################################
+###### 5. genotyping (ancient) ###########
+##################################################
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/Y_250423/
+mkdir -p genotypes
+
+pt1=($(pwd)"/")
+fn1=${pt1}"Bos.Y.degen.tv.panel"
+lst1="/data2/projects1/AnimalsChina/sample_info/Bos/JLU_cattle_unique_lib_summary_240503.txt"
+listf=${pt1}"AnimalsChina_list.txt"
+reff="/home/projects1/DataProcessing_MPI/reflist.txt"
+snpfl=${pt1}"snpf_capture_list_Y.txt" 
+of1=${pt1}"AnimalsChina.Y.degen.tv"
+of2=${pt1}"Bos.Y.degen.tv.combined"
+scf1=${pt1}"genotyping_Y.sh"
+
+# make snpf list 
+echo -e "Cattle\t"${fn1}"\tbos.Y" > ${snpfl}
+
+## make individual list file 
+# this study 
+dt1="/data2/projects1/AnimalsChina/DataProcessing/Bos/"
+sp="Cattle"
+if [[ -f "$listf" ]]; then rm ${listf}; fi 
+while read rid; do 
+    iid=($(echo ${rid}|cut -d"." -f1))
+    lid=($(echo ${rid}|cut -d"." -f1,2))
+    sid=${rid}"."${sp}
+    ibam=($(realpath ${dt1}${iid}/BAM/${sid}.*.rmdup.q30.bam))
+    echo ${iid} ${lid} ${rid} ${sp} ${ibam} |sed s/" "/"\t"/g >> ${listf}
+done < <(tail -n +2 ${lst1}|awk -F"\t" '$30 ~ /Bos/ && $18 > 0.001 && $31 == "M"'|cut -f4)
+
+## Run the job as a job array
+## Run only the limited number of jobs at a time
+idnmax=($(wc -l ${listf}))
+nperrun=8; if [ "$idnmax" -lt "$nperrun" ]; then nperrun=${idnmax}; fi
+
+sbatch --array=1-${idnmax}%${nperrun} -c 8 --mem 15000 -J genotype_Y -p amd --wrap=${scf1}" "${listf}" "${reff}" "${snpfl}
+
+## Merge into a single file per species
+echo -e "IID\tnCovered\tpCovered" > ${of1}.cov.txt 
+
+while read -r sp prx sfx; do
+    ## Merge into a single file
+    genofs=""; indfs="" 
+    while read -r rid; do
+        genof=($(realpath ${pt1}genotypes/${rid}/${rid}.${sp}.${sfx}.geno))
+        indf=($(realpath ${pt1}genotypes/${rid}/${rid}.${sp}.${sfx}.ind))
+        covf=($(realpath ${pt1}genotypes/${rid}/${rid}.${sp}.${sfx}.cov.txt))
+        val=($(tail -n +2 ${covf}|awk '{if ($3>0.2) print "T"; else print "F"}'))
+
+        tail -n +2 ${covf} >> ${of1}.cov.txt 
+
+        if [[ "$val" == "T" ]]; then
+            if [[ "$genofs" == "" ]]; then
+                genofs+=${genof}; indfs+=${indf} 
+            else
+                genofs+=" "${genof}; indfs+=" "${indf} 
+            fi
+        fi
+    done < <(awk -v sp="$sp" '{if ($4 == sp) print $3}' ${listf})
+
+    tnind=($(echo ${genofs} | awk '{print NF}'))
+    if [ "$tnind" -gt 0 ]; then
+        #paste ${genofs} -d '' > ${of1}.geno
+
+        ## Update sex information
+        if [ -f ${of1}.ind ]; then rm ${of1}.ind; fi
+        cat ${indfs}  > ${of1}.ind
+    fi
+done < ${snpfl}
+
+## combine 
+paste -d "" ${fn1}.geno ${of1}.geno > ${of2}.geno 
+cp ${fn1}.snp ${of2}.snp 
+cat ${fn1}.ind ${of1}.ind > ${of2}.ind
+
+
+#########################################################
+#### write the following script as "genotyping_Y.sh" ####
+
+#!/bin/bash
+
+pt1=($(pwd)"/")
+
+listf=$1   ## A list of samples to be processed 
+reff=$2    ## the reference genome list file
+snpfl=$3   ## snp/pos file
+inum=$SLURM_ARRAY_TASK_ID
+
+iid=($(awk -v inum="$inum" '{if (inum == NR) print $1}' ${listf}))   ## Individual ID
+lid=($(awk -v inum="$inum" '{if (inum == NR) print $2}' ${listf}))   ## library ID
+rid=($(awk -v inum="$inum" '{if (inum == NR) print $3}' ${listf}))   ## run ID
+sp=($(awk -v inum="$inum" '{if (inum == NR) print $4}' ${listf}))   ## reference
+ibam=($(awk -v inum="$inum" '{if (inum == NR) print $5}' ${listf}))   ## bam file 
+
+cd genotypes;
+
+###############################
+## Part 6. genotyping        ##
+
+## Repeat the process for each SNP set of the target species
+ref=($(awk -v sp="$sp" '{if ($1 == sp) print $2}' ${reff}))  ## Reference
+sid=${rid}"."${sp}
+
+## Make directory for each run id + reference
+mkdir -p ${rid}
+
+## Define the input BAM file
+## no-masked file for ssLib; otherwise, end-masked BAM file
+while read -r prx sfx; do
+
+    snpf1=${prx}".snp"           ## .snp file
+    posf=${prx}".pos.list.txt"   ## .pos file
+
+    of1=${sid}"."${sfx}
+    tn1="temp1_"${of1}
+
+    ## Run samtools mpileup
+    samtools mpileup -B -R -q30 -Q30 -l ${posf} -f ${ref} ${ibam} > ./${rid}/${tn1}_1
+
+    ## Fix chromosome name by species
+    cut -f 1 ./${rid}/${tn1}_1 | sed s/"Y"/"31"/g | \
+        paste - ./${rid}/${tn1}_1 | cut -f 1,3- | sort -k1,1n -k2,2n > ./${rid}/${of1}.pileup
+
+    ## Run pileupCaller
+    pileupCaller --randomHaploid --sampleNames ${rid} -f ${snpf1} -e ./${rid}/${tn1}_2 < ./${rid}/${of1}.pileup
+
+    ## Rename files
+    cp ./${rid}/${tn1}_2.geno ./${rid}/${of1}.geno
+
+    ## Specify sex
+    echo ${rid}|awk '{OFS="\t"}{print $1,"M",$1}' > ./${rid}/${of1}.ind
+
+    ## Count the number and proportion of SNPs typed
+    nsnps=($(wc -l ${snpf1}))
+    echo -e 'IID\tnCovered\tpCovered' > ./${rid}/${of1}.cov.txt
+    tnum1=($(awk '$1 != 9' ./${rid}/${of1}.geno | wc -l))
+    echo ${rid} ${tnum1} ${nsnps} | awk '{printf("%s\t%d\t%.5f\n"), $1,$2,$2/$3}' >> ./${rid}/${of1}.cov.txt
+
+    ## Clear the files
+    gzip ./${rid}/${of1}.pileup
+    rm ./${rid}/${tn1}_*
+
+done < <(awk -v sp="$sp" '{if ($1 == sp) print $2,$3}' ${snpfl})
+
+
+#############################################
+#### 6. Convert from eigenstrat to fasta ####
+#############################################
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/Y_250423/
+mkdir -p fasta; mkdir -p tree
+
+pt1=($(pwd)"/")
+fn1=${pt1}"Bos.Y.degen.tv.combined"
+fn2=${pt1}"Bos.Y.degen.tv.panel"
+of1=${pt1}"fasta/Bos.Y.combined.fasta"
+of2=${pt1}"tree/Bos.Y.combined"
+of3=${pt1}"fasta/Bos.Y.panel.fasta"
+of4=${pt1}"tree/Bos.Y.panel"
+scf1="/home/donghee_kim/script/eigenstrat_to_fasta.py"
+
+${scf1} -p ${fn1} -o ${of1}
+${scf1} -p ${fn2} -o ${of3}
+
+
+################################################################
+#### write the following script as "eigenstrat_to_fasta.py" #### 
+
+#!/opt/ohpc/pub/anaconda3/bin/python3
+
+import argparse
+import os
+import sys
+
+parser = argparse.ArgumentParser(description='Convert eigenstrat to fasta')
+parser.add_argument('--prefix','-p', help="Eigenstrat format file prefix")
+parser.add_argument('--out','-o', help="output file path")
+args = parser.parse_args()
+
+## Read INPUT file
+of1=args.prefix
+geno_file=of1+'.geno'
+snp_file=of1+'.snp'
+ind_file=of1+'.ind'
+output_fasta=args.out
+
+def eigenstrat_to_fasta(geno_file, snp_file, ind_file, output_fasta):
+    # Load SNPs: get reference and alternate alleles per line
+    snp_info = []
+    with open(snp_file, 'r') as f:
+        for line in f:
+            parts = line.strip().split()
+            ref = parts[4]
+            alt = parts[5]
+            snp_info.append((ref, alt))
+
+    # Load individual IDs
+    individuals = []
+    with open(ind_file, 'r') as f:
+        for line in f:
+            parts = line.strip().split()
+            individuals.append(parts[0])
+
+    num_individuals = len(individuals)
+
+    # Initialize FASTA sequences per individual
+    sequences = ['' for _ in range(num_individuals)]
+
+    # Parse geno file line by line (1 line = 1 SNP = N individuals)
+    with open(geno_file, 'r') as f:
+        for snp_index, line in enumerate(f):
+            if snp_index >= len(snp_info):
+                break  # Safety check
+
+            ref, alt = snp_info[snp_index]
+
+            for i, g in enumerate(line.strip()):
+                if g == '2':
+                    sequences[i] += ref
+                elif g == '0':
+                    sequences[i] += alt
+                elif g == '9':
+                    sequences[i] += 'N'
+                else:
+                    raise ValueError(f"Unexpected genotype '{g}' at SNP {snp_index}, individual {i}")
+
+    # Write to FASTA
+    with open(output_fasta, 'w') as out:
+        for i, seq in enumerate(sequences):
+            out.write(f">{individuals[i]}\n")
+            out.write(f"{seq}\n")
+
+    print(f"FASTA written to {output_fasta}")
+
+# Use 
+eigenstrat_to_fasta(geno_file, snp_file, ind_file, output_fasta)
+
+
+#########################################
+###### 7. Y tree (reference subset)  ####
+#########################################
+
+cd /data2/projects1/AnimalsChina/analysis/Bos/Y_250423/
+
+pt1=($(pwd)"/")
+fn1=${pt1}"Bos.Y.degen.tv.panel"
+fn2=${pt1}"AnimalsChina.Y.degen.tv"
+of1=${pt1}"Bos.Y.degen.tv.subset"
+of2=${pt1}"Bos.Y.combined.subset"
+of3=${pt1}"fasta/Bos.Y.combined.subset.fasta"
+of4=${pt1}"tree/Bos.Y.combined.subset"
+info=${pt1}"Y_reference_info.txt"
+scf1="/home/donghee_kim/script/eigenstrat_to_fasta.py"
+
+## subset 
+if [[ -f ids.txt ]]; then rm ids.txt; fi 
+while read hap; do 
+    awk -v hap=$hap '{if ($2==hap) print $1}' ${info}|head -n 10 >> ids.txt 
+done < <(tail -n +2 ${info}|cut -f2|sort|uniq)
+
+fgrep -wf ids.txt ${fn1}.ind > ${of1}.ind 
+
+cn1s=""
+while read iid; do 
+    cn1=($(awk -v iid=$iid '{if ($1==iid) print NR}' ${fn1}.ind))
+    if [[ "$cn1s" == "" ]]; then cn1s=${cn1}; else cn1s+=","${cn1}; fi 
+done < <(cut -f1 ${of1}.ind)
+
+cut -b${cn1s} ${fn1}.geno > ${of1}.geno 
+
+## combine 
+paste -d "" ${of1}.geno ${fn2}.geno > ${of2}.geno 
+cat ${of1}.ind ${fn2}.ind > ${of2}.ind 
+cp ${fn1}.snp ${of2}.snp 
+
+## covert to fasta 
+${scf1} -p ${of2} -o ${of3}
+
+# tree 
+CMD="iqtree -s ${of3} -pre ${of4} -m HKY -mem 20G -ntmax 12"
+sbatch -c 12 --mem 22000 --wrap="$CMD"
+
+java -jar /opt/ohpc/pub/apps/FigTree/v1.4.4/lib/figtree.jar 
+
